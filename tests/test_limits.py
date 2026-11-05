@@ -95,3 +95,27 @@ def test_repo_limits_file_loads():
         assert s.min <= s.neutral <= s.max
         assert L.clamp(name, s.max + 1000) == s.max
         assert L.clamp(name, s.min - 1000) == s.min
+
+
+def _with_failsafe_line(tmp_path, line: str) -> Path:
+    p = tmp_path / "limits.yaml"
+    p.write_text(SAMPLE.replace("command_timeout_ms: 500", f"command_timeout_ms: 500\n  {line}"))
+    return p
+
+
+def test_neutral_on_boot_parsed(tmp_path):
+    assert L.load_limits(_with_failsafe_line(tmp_path, "neutral_on_boot: true")).neutral_on_boot is True
+    assert L.load_limits(_with_failsafe_line(tmp_path, "neutral_on_boot: false")).neutral_on_boot is False
+
+
+def test_neutral_on_boot_absent_is_none(limits):
+    assert limits.neutral_on_boot is None
+
+
+def test_neutral_on_boot_rejects_non_bool(tmp_path):
+    with pytest.raises(L.LimitsError):
+        L.load_limits(_with_failsafe_line(tmp_path, 'neutral_on_boot: "false"'))
+
+
+def test_repo_limits_neutral_on_boot():
+    assert isinstance(L.load_limits().neutral_on_boot, bool)

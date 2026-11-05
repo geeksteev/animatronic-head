@@ -45,6 +45,7 @@ class ServoLimits:
 class Limits:
     servos: Mapping[str, ServoLimits]
     command_timeout_ms: int | None = None
+    neutral_on_boot: bool | None = None
 
     def __getitem__(self, servo: str) -> ServoLimits:
         try:
@@ -115,11 +116,19 @@ def load_limits(path: str | Path | None = None) -> Limits:
     servos = {str(name): _parse_servo(str(name), raw) for name, raw in servos_raw.items()}
 
     timeout = None
+    neutral_on_boot = None
     failsafe = data.get("failsafe")
-    if isinstance(failsafe, Mapping) and "command_timeout_ms" in failsafe:
-        timeout = int(failsafe["command_timeout_ms"])
+    if isinstance(failsafe, Mapping):
+        if "command_timeout_ms" in failsafe:
+            timeout = int(failsafe["command_timeout_ms"])
+        if "neutral_on_boot" in failsafe:
+            raw_nob = failsafe["neutral_on_boot"]
+            # Only a real YAML boolean: bool("false") would silently be True.
+            if not isinstance(raw_nob, bool):
+                raise LimitsError(f"{path}: failsafe.neutral_on_boot must be true or false")
+            neutral_on_boot = raw_nob
 
-    return Limits(servos=servos, command_timeout_ms=timeout)
+    return Limits(servos=servos, command_timeout_ms=timeout, neutral_on_boot=neutral_on_boot)
 
 
 _default: Limits | None = None
