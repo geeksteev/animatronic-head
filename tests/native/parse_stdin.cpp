@@ -1,0 +1,45 @@
+// Cross-check harness for eye_protocol. Built and driven by tests/test_eye_protocol_cross.py.
+// Reads one hex-encoded datagram per line (hex so any bytes, including newlines, can be sent)
+// and prints one result line per input: "look X Y", "blink MS", "center", "ping" or "invalid".
+#include <stdio.h>
+#include <string.h>
+
+#include "eye_protocol.h"
+
+static int hex_val(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+int main() {
+    // Up to 4 * EYE_MAX_DATAGRAM bytes so oversize inputs can be tested too.
+    static char line[16 * EYE_MAX_DATAGRAM];
+    static char data[8 * EYE_MAX_DATAGRAM];
+    while (fgets(line, sizeof(line), stdin) != nullptr) {
+        size_t n = strcspn(line, "\r\n");
+        size_t len = 0;
+        bool ok = (n % 2 == 0) && (n / 2 <= sizeof(data));
+        for (size_t i = 0; ok && i < n; i += 2) {
+            int hi = hex_val(line[i]), lo = hex_val(line[i + 1]);
+            if (hi < 0 || lo < 0) ok = false;
+            else data[len++] = static_cast<char>(hi * 16 + lo);
+        }
+        Command c{};
+        if (!ok) {
+            printf("error\n");
+        } else if (!parse_command(data, len, c)) {
+            printf("invalid\n");
+        } else {
+            switch (c.type) {
+                case CmdType::Look: printf("look %.3f %.3f\n", c.x, c.y); break;
+                case CmdType::Blink: printf("blink %u\n", static_cast<unsigned>(c.blink_ms)); break;
+                case CmdType::Center: printf("center\n"); break;
+                case CmdType::Ping: printf("ping\n"); break;
+            }
+        }
+        fflush(stdout);
+    }
+    return 0;
+}
