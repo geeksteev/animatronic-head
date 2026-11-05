@@ -1,0 +1,9 @@
+{
+  "name": "eye_core",
+  "version": "0.1.0",
+  "description": "Hardware-independent eye motion controller (look, blink, fail-safe, rate limiting). Plain C++17, no Arduino dependency.",
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}
