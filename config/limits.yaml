@@ -1,0 +1,20 @@
+# SERVO SAFETY LIMITS: human-owned.
+# CI and the reviewer agent reject any PR that changes this file. Edit it yourself, directly on main.
+#
+# PLACEHOLDER VALUES. Calibrate every servo on the bench before trusting these:
+# move each one slowly toward its mechanical stop, back off ~5 degrees, record that as min/max.
+# Channel numbers are guesses for a 6-servo eye mechanism (pan, tilt, 4 lids).
+
+units: degrees
+
+failsafe:
+  command_timeout_ms: 500      # no command for this long -> all servos to neutral
+  neutral_on_boot: true
+
+servos:
+  eye_pan:          { channel: 0, min: 60,  max: 120, neutral: 90, max_speed_dps: 300 }
+  eye_tilt:         { channel: 1, min: 70,  max: 110, neutral: 90, max_speed_dps: 300 }
+  lid_upper_left:   { channel: 2, min: 80,  max: 110, neutral: 90, max_speed_dps: 600 }
+  lid_lower_left:   { channel: 3, min: 80,  max: 110, neutral: 90, max_speed_dps: 600 }
+  lid_upper_right:  { channel: 4, min: 80,  max: 110, neutral: 90, max_speed_dps: 600 }
+  lid_lower_right:  { channel: 5, min: 80,  max: 110, neutral: 90, max_speed_dps: 600 }

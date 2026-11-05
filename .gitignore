@@ -1,0 +1,7 @@
+.pio/
+__pycache__/
+*.pyc
+.venv/
+secrets.h
+secrets.yaml
+*.local.*
