@@ -73,3 +73,25 @@ with OpenCVCamera(CameraSettings(exposure=200, focus=40)) as cam:
 - The first `warmup_frames` (30) frames are discarded while the sensor settles.
 - `FakeCamera(source, clock)` is a deterministic stand-in for tests; `source` is a list of
   images or a callable `(t) -> image`.
+
+## Motion detector
+
+`bench/motion.py` decides from camera frames whether the eye moved after a command, when it
+started and when it settled. It uses numpy only (no OpenCV, no I/O, no randomness), so it is
+deterministic and tested on synthetic frames.
+
+```python
+from bench.motion import NoiseFloor, analyze, matches_reference
+
+nf = NoiseFloor.from_frames(still_frames)             # threshold = max(1.0, mean + 4 * std)
+r = analyze(frames, command_t, nf.threshold)          # frames: list of bench.camera.Frame
+r.moved, r.latency_s, r.settled, r.settle_time_s, r.peak_score
+ok, score = matches_reference(image, neutral_image, nf.threshold)
+```
+
+- Frames are converted to grayscale with fixed integer weights, optionally cropped to
+  `roi=(x, y, w, h)` and downscaled by block mean (2x by default). Measure the noise floor
+  with the same `roi` and `downscale` that you pass to `analyze`.
+- Each score is stamped with the later frame's `t`. Motion before `command_t` is ignored.
+- `settled_t` is the first frame of a still run lasting `settle_window_s` (0.2 s). If that run
+  starts after `command_t + timeout_s` (2 s), `settled` is False.
