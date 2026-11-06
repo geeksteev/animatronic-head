@@ -117,5 +117,16 @@ def test_neutral_on_boot_rejects_non_bool(tmp_path):
         L.load_limits(_with_failsafe_line(tmp_path, 'neutral_on_boot: "false"'))
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["null", "true", "false", "500.9", "500.0", '"500"', "abc", "[500]"],
+)
+def test_command_timeout_rejects_non_int(tmp_path, value):
+    p = tmp_path / "limits.yaml"
+    p.write_text(SAMPLE.replace("command_timeout_ms: 500", f"command_timeout_ms: {value}"))
+    with pytest.raises(L.LimitsError):
+        L.load_limits(p)
+
+
 def test_repo_limits_neutral_on_boot():
     assert isinstance(L.load_limits().neutral_on_boot, bool)
