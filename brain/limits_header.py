@@ -21,6 +21,12 @@ DEFAULT_HEADER_PATH = REPO_ROOT / "firmware" / "eyes_esp32" / "include" / "limit
 _GUARD = "EYE_LIMITS_GENERATED_H"
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# Upper bound for failsafe.command_timeout_ms. The firmware stores the value in
+# a uint32_t, so anything >= 2**32 would be truncated, and a timeout longer than
+# a few seconds leaves the servos holding a stale pose for too long to count as
+# a fail-safe. 10 s is far above any sensible setting.
+MAX_COMMAND_TIMEOUT_MS = 10_000
+
 
 def _c_float(value: float) -> str:
     text = repr(float(value))
@@ -32,12 +38,16 @@ def _c_float(value: float) -> str:
 def render_header(limits: Limits) -> str:
     """Return the header text for ``limits``.
 
-    Raises LimitsError if the fail-safe timeout is missing or not positive, or
-    if a servo name or channel cannot be represented in the header.
+    Raises LimitsError if the fail-safe timeout is missing, not positive, or
+    above ``MAX_COMMAND_TIMEOUT_MS``, or if a servo name or channel cannot be represented in the header.
     """
     timeout = limits.command_timeout_ms
     if timeout is None or timeout <= 0:
         raise LimitsError("failsafe.command_timeout_ms must be set and > 0; the fail-safe cannot be disabled")
+    if timeout > MAX_COMMAND_TIMEOUT_MS:
+        raise LimitsError(
+            f"failsafe.command_timeout_ms is {timeout}; it must be <= {MAX_COMMAND_TIMEOUT_MS} ms"
+        )
     if limits.neutral_on_boot is None:
         raise LimitsError("failsafe.neutral_on_boot must be set")
 

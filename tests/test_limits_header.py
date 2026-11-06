@@ -57,6 +57,31 @@ def test_non_positive_timeout_raises(tmp_path, value):
         H.render_header(load_limits(_write(tmp_path, body)))
 
 
+@pytest.mark.parametrize("value", [1, H.MAX_COMMAND_TIMEOUT_MS])
+def test_timeout_boundary_accepted(tmp_path, value):
+    body = SAMPLE.replace("command_timeout_ms: 250", f"command_timeout_ms: {value}")
+    text = H.render_header(load_limits(_write(tmp_path, body)))
+    assert f"#define EYE_LIMITS_COMMAND_TIMEOUT_MS {value}\n" in text
+
+
+@pytest.mark.parametrize("value", [H.MAX_COMMAND_TIMEOUT_MS + 1, 2**32 - 1, 2**32, 2**32 + 500, 10**30])
+def test_timeout_above_max_raises(tmp_path, value):
+    body = SAMPLE.replace("command_timeout_ms: 250", f"command_timeout_ms: {value}")
+    with pytest.raises(LimitsError, match="command_timeout_ms"):
+        H.render_header(load_limits(_write(tmp_path, body)))
+
+
+def test_max_timeout_fits_uint32():
+    assert 0 < H.MAX_COMMAND_TIMEOUT_MS <= 2**32 - 1
+
+
+def test_cli_fails_with_oversized_timeout(tmp_path):
+    out = tmp_path / "limits.h"
+    body = SAMPLE.replace("command_timeout_ms: 250", f"command_timeout_ms: {2**32}")
+    assert H.main(["--limits", str(_write(tmp_path, body)), "--out", str(out)]) == 1
+    assert not out.exists()
+
+
 def test_missing_neutral_on_boot_raises(tmp_path):
     body = SAMPLE.replace("  neutral_on_boot: false\n", "")
     with pytest.raises(LimitsError):
