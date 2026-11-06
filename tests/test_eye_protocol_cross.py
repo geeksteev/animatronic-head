@@ -90,6 +90,17 @@ def _handwritten_vectors() -> list[bytes]:
         '{"v":2,"v":1,"cmd":"ping"}',
         '{"v":1,"cmd":"look","cmd":"blink"}',
         '{"v":1,"cmd":"ping","d":' + "[" * 45 + "]" * 45 + "}",
+        '{"v":1,"cmd":"ping","d":' + '{"a":[' * 9 + "]}" * 9 + "}",
+        '{"v":1,"cmd":"ping","d":[{"b":[{}]},[],{"c":{"d":[1,{"e":null}]}}],"x":2}',
+        '{"v":1,"cmd":"ping","d":[ { "a" : [ ] , "b" : { } } , 1 ] }',
+        # malformed nesting in a skipped value
+        '{"v":1,"cmd":"ping","d":[}', '{"v":1,"cmd":"ping","d":{]}',
+        '{"v":1,"cmd":"ping","d":[{]}', '{"v":1,"cmd":"ping","d":{"a":[}]}',
+        '{"v":1,"cmd":"ping","d":[[]]]}', '{"v":1,"cmd":"ping","d":{"a":{}}}}',
+        '{"v":1,"cmd":"ping","d":[1 2]}', '{"v":1,"cmd":"ping","d":{"a" 1}}',
+        '{"v":1,"cmd":"ping","d":{1:2}}', '{"v":1,"cmd":"ping","d":{"a":1,}}',
+        '{"v":1,"cmd":"ping","d":[,1]}', '{"v":1,"cmd":"ping","d":{"a"}}',
+        '{"v":1,"cmd":"ping","d":[[],[]', '{"v":1,"cmd":"ping","d":{"a":[{"b":1}]',
         # malformed JSON
         "", " ", "{", "}", "[]", "[1]", "1", '"ping"', "null", "true",
         '{"v":1,"cmd":"ping"', '{"v":1,"cmd":"ping",}', '{"v":1,,"cmd":"ping"}',
