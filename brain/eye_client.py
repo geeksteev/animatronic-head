@@ -32,7 +32,7 @@ from typing import Sequence
 import yaml
 
 from brain import eye_protocol
-from brain.eye_protocol import Blink, Center, Command, Look, Ping
+from brain.eye_protocol import Blink, Center, Command, Look, Ping, ProtocolError, Servo
 from brain.limits import Limits, load_limits
 
 HOST_ENV = "EYES_HOST"
@@ -95,6 +95,7 @@ class EyeClient:
         if timeout_ms <= 0:
             raise ValueError(f"failsafe.command_timeout_ms must be positive, got {timeout_ms}")
 
+        self.limits = limits
         self.command_timeout_ms = timeout_ms
         self.heartbeat_interval = timeout_ms / 3 / 1000.0  # seconds
 
@@ -127,6 +128,18 @@ class EyeClient:
 
     def ping(self) -> int:
         return self.send(Ping())
+
+    def servo(self, name: str, deg: float) -> int:
+        """Set one servo, by its name in the limits, to ``deg`` degrees. Returns the seq.
+
+        The angle is clamped to that servo's ``[min, max]`` before sending (the head
+        clamps again). Raises ``UnknownServoError`` for a name not in the limits and
+        ``eye_protocol.ProtocolError`` (a ValueError) for NaN/inf, before anything is sent.
+        """
+        lim = self.limits[name]
+        if isinstance(deg, bool) or not isinstance(deg, (int, float)) or not math.isfinite(deg):
+            raise ProtocolError(f"deg for servo {name!r} must be a finite number")
+        return self.send(Servo(lim.channel, self.limits.clamp(name, deg)))
 
     def send(self, cmd: Command) -> int:
         """Encode, sign and send ``cmd`` with the next seq. Returns the seq used.
