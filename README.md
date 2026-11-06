@@ -59,6 +59,7 @@ python -m brain.limits_header
 ```sh
 pip install -e .
 export EYES_HOST=<head hostname or address>
+cp config/secrets.yaml.example config/secrets.yaml   # set eye_key (or export EYES_KEY)
 python -m brain.eye_client look 0.25 -0.5
 python -m brain.eye_client blink 300
 python -m brain.eye_client --hold 5 look -1 0   # keep the heartbeat going for 5 s
@@ -71,7 +72,7 @@ See [docs/eye-client.md](docs/eye-client.md) for the Python API.
 ```sh
 pip install platformio
 cp firmware/eyes_esp32/include/secrets.h.example firmware/eyes_esp32/include/secrets.h
-# edit secrets.h: set WIFI_SSID and WIFI_PASSWORD
+# edit secrets.h: set WIFI_SSID, WIFI_PASSWORD and EYE_AUTH_KEY_HEX (same key as the brain)
 pio run -d firmware/eyes_esp32 -t upload
 ```
 
@@ -80,6 +81,11 @@ pio run -d firmware/eyes_esp32 -t upload
 No credentials or hostnames go in the repo. Wi-Fi settings live in gitignored files
 (`secrets.h`, `secrets.yaml`, `*.local.*`) with a committed `.example` template. The head's
 address is passed to the brain with `--host` or `EYES_HOST`.
+
+Eye commands are authenticated with a shared key (HMAC-SHA256 plus a replay check, see
+[Authentication](docs/eye-protocol.md#authentication)), so other devices on the LAN cannot move
+the eyes or keep the fail-safe from engaging. The key goes in `EYE_AUTH_KEY_HEX` in the head's
+`secrets.h`, and in `eye_key` in `config/secrets.yaml` (or `EYES_KEY`) on the brain.
 
 ## Development
 
