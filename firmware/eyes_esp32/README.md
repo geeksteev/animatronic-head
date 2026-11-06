@@ -9,13 +9,20 @@ angles to the servos. The head is I/O only: all motion logic lives in `lib/eye_c
 ```sh
 pip install platformio
 cp firmware/eyes_esp32/include/secrets.h.example firmware/eyes_esp32/include/secrets.h
-# edit secrets.h: set WIFI_SSID and WIFI_PASSWORD
+# edit secrets.h: set WIFI_SSID, WIFI_PASSWORD and EYE_AUTH_KEY_HEX
+# key: python -c "import secrets; print(secrets.token_hex(32))", same value as the brain's eye_key
 pio run -d firmware/eyes_esp32 -t upload
 pio device monitor -b 115200
 ```
 
 `include/secrets.h` is gitignored. Never commit it. Without it, the firmware still builds (with a
 `#warning`) but skips Wi-Fi, so the servos just hold neutral. This is how CI builds it.
+If `secrets.h` exists but has no `EYE_AUTH_KEY_HEX`, or the key is not 64 hex characters, the build
+fails. An all-zero key builds but Wi-Fi stays off.
+
+The head only acts on datagrams with a valid tag and a `seq` above the last one it accepted
+([Authentication](../../docs/eye-protocol.md#authentication)). Anything else is dropped and does
+not reset the fail-safe timer.
 
 On serial you will see the IP address once Wi-Fi connects, plus `[failsafe] ENTER/EXIT` lines.
 If no valid command arrives for `failsafe.command_timeout_ms`, or Wi-Fi drops, the servos return to
@@ -30,7 +37,7 @@ Do this with the linkages **disconnected** first, then connected, moving slowly.
    have a human record min/max/neutral in `config/limits.yaml`. Then run `python -m brain.limits_header`
    and reflash. Until then, treat the placeholder limits as untrusted.
 3. **Pulse range.** Confirm `SERVO_MIN_US`/`SERVO_MAX_US` (500–2500 µs for 0–180°) suit your TS90MDs.
-4. **Lid closed direction.** Send `{"v":1,"seq":1,"cmd":"blink","ms":1000}` and watch each lid. If a lid opens
+4. **Lid closed direction.** Send `python -m brain.eye_client blink 1000` and watch each lid. If a lid opens
    instead of closing, flip its entry in `LID_CLOSED_AT_MAX` in `include/pins.h`.
 5. **Fail-safe.** Send a `look` command, stop sending, and check that everything returns to neutral
    within about `command_timeout_ms`. Repeat with the Wi-Fi access point switched off.
@@ -41,10 +48,12 @@ Do this with the linkages **disconnected** first, then connected, moving slowly.
 C++17 with no Arduino dependency. Limits are injected via `EyeConfig`. Host tests live in
 `tests/native/test_eye_controller.cpp` and run through `pytest` (`tests/test_eye_core_native.py`).
 
-`lib/eye_core/src/eye_protocol.*` parses the UDP datagrams from `docs/eye-protocol.md`
+`lib/eye_core/src/eye_protocol.*` parses the UDP payloads from `docs/eye-protocol.md`
 (`parse_command`) and forwards them to the controller (`dispatch`). It is a small strict JSON
-reader with no heap use. `tests/test_eye_protocol_cross.py` checks it against
-`brain.eye_protocol.decode` on several hundred valid and malformed datagrams.
+reader with no heap use. `lib/eye_core/src/eye_auth.*` checks the HMAC-SHA256 tag and the
+replay window (`open_command`, which calls `parse_command`). `tests/test_eye_protocol_cross.py`
+checks both against `brain.eye_protocol` on several hundred valid, malformed, forged and
+replayed datagrams.
 
 ## Servo limits
 

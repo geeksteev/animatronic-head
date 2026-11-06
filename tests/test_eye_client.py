@@ -1,6 +1,5 @@
 """Tests for brain.eye_client against a fake head (a UDP socket on loopback)."""
 
-import json
 import math
 import os
 import socket
@@ -16,6 +15,7 @@ from brain.eye_protocol import Blink, Center, Look, Ping
 from brain.limits import load_limits
 
 ROOT = Path(__file__).resolve().parent.parent
+KEY = bytes(range(1, 33))
 
 SERVOS = """
 servos:
@@ -29,6 +29,12 @@ def _limits(tmp_path: Path, failsafe: str):
     return load_limits(p)
 
 
+@pytest.fixture(autouse=True)
+def eye_key(monkeypatch):
+    """Every client in these tests gets KEY via $EYES_KEY unless a test overrides it."""
+    monkeypatch.setenv(eye_client.KEY_ENV, KEY.hex())
+
+
 @pytest.fixture
 def head():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -39,8 +45,8 @@ def head():
 
 
 def _recv(sock: socket.socket):
-    data = sock.recv(1024)
-    return eye_protocol.decode(data), json.loads(data)["seq"]
+    seq, cmd = eye_protocol.decode_signed(sock.recv(1024), KEY)
+    return cmd, seq
 
 
 def _drain(sock: socket.socket, duration: float):
@@ -53,7 +59,7 @@ def _drain(sock: socket.socket, duration: float):
             return out
         sock.settimeout(left)
         try:
-            out.append(eye_protocol.decode(sock.recv(1024)))
+            out.append(eye_protocol.decode_signed(sock.recv(1024), KEY)[1])
         except socket.timeout:
             return out
 
@@ -135,11 +141,105 @@ def test_nonpositive_timeout_raises(tmp_path):
         eye_client.EyeClient("127.0.0.1", limits=limits)
 
 
-def test_seq_wraps(client, head):
+def test_seq_never_wraps(client, head):
     client._seq = eye_protocol.SEQ_MAX
     client.ping()
-    client.ping()
-    assert [_recv(head)[1] for _ in range(2)] == [eye_protocol.SEQ_MAX, 0]
+    with pytest.raises(RuntimeError):
+        client.ping()
+    assert _recv(head)[1] == eye_protocol.SEQ_MAX
+    assert _drain(head, 0.05) == []
+
+
+def test_restarted_client_passes_head_replay_guard(tmp_path, head):
+    limits = _limits(tmp_path, "failsafe:\n  command_timeout_ms: 500\n")
+    guard = eye_protocol.ReplayGuard()
+    for _ in range(3):
+        with eye_client.EyeClient("127.0.0.1", head.getsockname()[1], limits=limits) as c:
+            for _ in range(50):
+                c.ping()
+        seqs = [_recv(head)[1] for _ in range(50)]
+        assert all(guard.accept(s) for s in seqs)
+
+
+def test_explicit_key_is_used(tmp_path, head, monkeypatch):
+    monkeypatch.delenv(eye_client.KEY_ENV)
+    other = bytes(range(2, 34))
+    limits = _limits(tmp_path, "failsafe:\n  command_timeout_ms: 500\n")
+    with eye_client.EyeClient("127.0.0.1", head.getsockname()[1], limits=limits, key=other) as c:
+        c.ping()
+    data = head.recv(1024)
+    assert eye_protocol.decode_signed(data, other)[1] == Ping()
+    with pytest.raises(eye_protocol.AuthError):
+        eye_protocol.decode_signed(data, KEY)
+
+
+@pytest.mark.parametrize("key", [b"", b"x" * 31, b"x" * 33])
+def test_bad_key_length_raises(tmp_path, key):
+    limits = _limits(tmp_path, "failsafe:\n  command_timeout_ms: 500\n")
+    with pytest.raises(ValueError):
+        eye_client.EyeClient("127.0.0.1", limits=limits, key=key)
+
+
+# --- key loading ------------------------------------------------------------
+
+def test_load_key_from_env():
+    assert eye_client.load_eye_key(Path("/nonexistent/secrets.yaml")) == KEY
+
+
+def test_load_key_from_file(tmp_path, monkeypatch):
+    monkeypatch.delenv(eye_client.KEY_ENV)
+    p = tmp_path / "secrets.yaml"
+    p.write_text(f'eye_key: "{KEY.hex()}"\n')
+    assert eye_client.load_eye_key(p) == KEY
+
+
+def test_env_overrides_file(tmp_path):
+    p = tmp_path / "secrets.yaml"
+    p.write_text(f'eye_key: "{bytes(range(2, 34)).hex()}"\n')
+    assert eye_client.load_eye_key(p) == KEY
+
+
+@pytest.mark.parametrize(
+    "content",
+    [None, "", "other: 1\n", "eye_key: 123\n", "- a\n", 'eye_key: "abc"\n'],
+)
+def test_load_key_missing_or_bad(tmp_path, monkeypatch, content):
+    monkeypatch.delenv(eye_client.KEY_ENV)
+    p = tmp_path / "secrets.yaml"
+    if content is not None:
+        p.write_text(content)
+    with pytest.raises(ValueError):
+        eye_client.load_eye_key(p)
+
+
+def test_bad_env_key_raises(monkeypatch):
+    monkeypatch.setenv(eye_client.KEY_ENV, "zz")
+    with pytest.raises(ValueError, match=eye_client.KEY_ENV):
+        eye_client.load_eye_key()
+
+
+def test_example_secrets_is_a_placeholder_not_a_key(monkeypatch):
+    monkeypatch.delenv(eye_client.KEY_ENV)
+    example = ROOT / "config" / "secrets.yaml.example"
+    with pytest.raises(ValueError):
+        eye_client.load_eye_key(example)
+
+
+def test_client_without_key_refuses(tmp_path, monkeypatch):
+    monkeypatch.delenv(eye_client.KEY_ENV)
+    monkeypatch.setattr(eye_client, "SECRETS_PATH", tmp_path / "missing.yaml")
+    limits = _limits(tmp_path, "failsafe:\n  command_timeout_ms: 500\n")
+    with pytest.raises(ValueError):
+        eye_client.EyeClient("127.0.0.1", limits=limits)
+
+
+def test_cli_without_key_exits_nonzero(monkeypatch, tmp_path, head, capsys):
+    monkeypatch.delenv(eye_client.KEY_ENV)
+    monkeypatch.setattr(eye_client, "SECRETS_PATH", tmp_path / "missing.yaml")
+    port = str(head.getsockname()[1])
+    assert eye_client.main(["--host", "127.0.0.1", "--port", port, "ping"]) == 1
+    assert eye_client.KEY_ENV in capsys.readouterr().err
+    assert _drain(head, 0.05) == []
 
 
 def test_cli_without_host_exits_nonzero(monkeypatch, capsys):

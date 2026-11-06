@@ -1,7 +1,8 @@
-"""Cross-check the C++ eye_protocol parser against brain.eye_protocol.decode.
+"""Cross-check the C++ eye_protocol parser and eye_auth against brain.eye_protocol.
 
 Builds tests/native/parse_stdin.cpp with the eye_core sources, feeds it one hex-encoded
-datagram per line, and checks every printed result against the Python decoder.
+payload (or signed datagram) per line, and checks every printed result against the Python
+decoder (or decode_signed plus ReplayGuard).
 """
 
 import itertools
@@ -14,20 +15,33 @@ from pathlib import Path
 import pytest
 
 from brain import eye_protocol as P
-from brain.eye_protocol import Blink, Center, Look, Ping, ProtocolError, decode, encode
+from brain.eye_protocol import (
+    Blink,
+    Center,
+    Look,
+    Ping,
+    ProtocolError,
+    ReplayGuard,
+    decode,
+    decode_signed,
+    encode,
+    sign,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 LIB_SRC = ROOT / "firmware" / "eyes_esp32" / "lib" / "eye_core" / "src"
 HEADER = LIB_SRC / "eye_protocol.h"
 HARNESS = ROOT / "tests" / "native" / "parse_stdin.cpp"
+AUTH_HEADER = LIB_SRC / "eye_auth.h"
+KEY = bytes(range(1, 33))
 
 CXXFLAGS = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-O1"]
 TOL = 0.001
 
 
-def _define(name: str) -> int:
-    m = re.search(rf"^#define\s+{name}\s+(\d+)\s*$", HEADER.read_text(), re.MULTILINE)
-    assert m, f"{name} not defined in {HEADER.name}"
+def _define(name: str, header: Path = HEADER) -> int:
+    m = re.search(rf"^#define\s+{name}\s+(\d+)\b", header.read_text(), re.MULTILINE)
+    assert m, f"{name} not defined in {header.name}"
     return int(m.group(1))
 
 
@@ -39,8 +53,14 @@ def test_max_datagram_matches_python():
     assert _define("EYE_MAX_DATAGRAM") == P.MAX_DATAGRAM
 
 
+def test_auth_sizes_match_python():
+    assert _define("EYE_AUTH_TAG_LEN") == P.TAG_LEN
+    assert _define("EYE_MAX_PAYLOAD") == P.MAX_PAYLOAD
+    assert _define("EYE_AUTH_KEY_LEN", AUTH_HEADER) == P.KEY_LEN
+
+
 def test_parser_has_no_heap_or_arduino():
-    for name in ("eye_protocol.h", "eye_protocol.cpp"):
+    for name in ("eye_protocol.h", "eye_protocol.cpp", "eye_auth.h", "eye_auth.cpp"):
         text = (LIB_SRC / name).read_text()
         code = re.sub(r"//.*", "", text)
         for bad in ("Arduino.h", "malloc", "calloc", "realloc", "free(", "new ", "delete ",
@@ -56,7 +76,7 @@ def _valid_vectors() -> list[bytes]:
     out = []
     for x, y in itertools.product(values, repeat=2):
         out.append(encode(Look(x, y)))
-    for seq in (None, 0, 1, 7, 2**31 - 1):
+    for seq in (None, 0, 1, 7, 2**31 - 1, 2**31, 2**53 - 1):
         out.append(encode(Look(0.25, -0.5), seq))
         out.append(encode(Blink(), seq))
         out.append(encode(Center(), seq))
@@ -115,7 +135,8 @@ def _handwritten_vectors() -> list[bytes]:
         '{"v":true,"cmd":"ping"}', '{"v":null,"cmd":"ping"}', '{"v":01,"cmd":"ping"}',
         '{"v":1,"cmd":"ping","v":2}',
         # seq
-        '{"v":1,"seq":-1,"cmd":"ping"}', '{"v":1,"seq":2147483648,"cmd":"ping"}',
+        '{"v":1,"seq":-1,"cmd":"ping"}', '{"v":1,"seq":9007199254740992,"cmd":"ping"}',
+        '{"v":1,"seq":18446744073709551616,"cmd":"ping"}', '{"v":1,"seq":2147483648,"cmd":"ping"}',
         '{"v":1,"seq":99999999999999999999,"cmd":"ping"}', '{"v":1,"seq":1.0,"cmd":"ping"}',
         '{"v":1,"seq":1e3,"cmd":"ping"}', '{"v":1,"seq":"7","cmd":"ping"}',
         '{"v":1,"seq":null,"cmd":"ping"}', '{"v":1,"seq":true,"cmd":"ping"}',
@@ -152,9 +173,10 @@ def _handwritten_vectors() -> list[bytes]:
         b'{"v":1,"cmd":"ping"}\x00',                     # trailing NUL
         b'\xef\xbb\xbf{"v":1,"cmd":"ping"}',             # BOM
     ]
-    # Size boundary: exactly MAX_DATAGRAM is parsed, one more byte is rejected.
+    # Size boundary: exactly MAX_PAYLOAD is parsed, one more byte is rejected.
     head = b'{"v":1,"cmd":"ping","pad":"'
-    for size in (P.MAX_DATAGRAM - 1, P.MAX_DATAGRAM, P.MAX_DATAGRAM + 1, 4 * P.MAX_DATAGRAM):
+    for size in (P.MAX_PAYLOAD - 1, P.MAX_PAYLOAD, P.MAX_PAYLOAD + 1, P.MAX_DATAGRAM,
+                 4 * P.MAX_DATAGRAM):
         out.append(head + b"a" * (size - len(head) - 2) + b'"}')
     return out
 
@@ -233,3 +255,85 @@ def test_cpp_matches_python_decoder(parser_bin: Path):
         if not _matches(line, expected):
             mismatches.append(f"{data!r}: C++ {line!r}, Python {expected!r}")
     assert not mismatches, "\n".join(mismatches)
+
+
+# --- authenticated datagrams ------------------------------------------------
+
+def _auth_vectors() -> list[bytes]:
+    """A stream of datagrams as the head would see it: genuine, forged, replayed and late."""
+    other = bytes(range(2, 34))
+    out: list[bytes] = []
+    seq = 0
+    for payload in _vectors():
+        if len(payload) > P.MAX_PAYLOAD:
+            out.append(payload)
+            continue
+        seq += 3
+        if payload.startswith(b"{"):
+            # Give it a fresh seq (an existing "seq" later in the payload wins, as in json).
+            with_seq = b'{"seq":%d,' % seq + payload[1:]
+            if len(with_seq) <= P.MAX_PAYLOAD:
+                out.append(sign(with_seq, KEY))
+                out.append(sign(b'{"seq":%d,' % (seq - 1) + payload[1:], KEY))  # late
+        out.append(payload)                      # unsigned
+        out.append(sign(payload, other))         # wrong key
+        signed = sign(payload, KEY)
+        out.append(signed)                       # payload as-is (seq may be absent)
+        if signed[-1:] != b"0":
+            out.append(signed[:-1] + b"0")       # tag tampered
+        out.append(signed[:-1])                  # truncated
+        out.append(signed)                       # replay
+    # Seq-ordered stream with replays and late datagrams.
+    for s in [10**15, 10**15 + 1, 10**15, 10**15 - 1, 10**15 + 5, 10**15 + 2, P.SEQ_MAX, 0,
+              P.SEQ_MAX]:
+        out.append(sign(encode(Ping(), s), KEY))
+    out.append(b"0" * P.TAG_LEN)
+    out.append(b"")
+    out.append(b"x" * (P.MAX_DATAGRAM + 1))
+    return out
+
+
+def _expected_auth(stream: list[bytes]) -> list[tuple]:
+    guard = ReplayGuard()
+    out = []
+    for data in stream:
+        try:
+            seq, cmd = decode_signed(data, KEY)
+        except ProtocolError:
+            out.append(("invalid",))
+            continue
+        if not guard.accept(seq):
+            out.append(("invalid",))
+            continue
+        out.append((seq, *_expected(encode(cmd))))
+    return out
+
+
+def test_auth_vectors_cover_both_outcomes():
+    results = _expected_auth(_auth_vectors())
+    accepted = [r for r in results if r[0] != "invalid"]
+    assert len(accepted) >= 50
+    assert len(results) - len(accepted) >= 200
+    for kind in ("look", "blink", "center", "ping"):
+        assert any(r[1] == kind for r in accepted), kind
+
+
+def test_cpp_open_command_matches_python(parser_bin: Path):
+    stream = _auth_vectors()
+    stdin = "".join(d.hex() + "\n" for d in stream)
+    run = subprocess.run([str(parser_bin), KEY.hex()], input=stdin, capture_output=True,
+                         text=True, timeout=60)
+    assert run.returncode == 0, run.stderr
+    lines = run.stdout.splitlines()
+    assert len(lines) == len(stream)
+
+    mismatches = []
+    for data, line, expected in zip(stream, lines, _expected_auth(stream)):
+        if expected[0] == "invalid":
+            ok = line == "invalid"
+        else:
+            seq, _, rest = line.partition(" ")
+            ok = seq == str(expected[0]) and _matches(rest, expected[1:])
+        if not ok:
+            mismatches.append(f"{data!r}: C++ {line!r}, Python {expected!r}")
+    assert not mismatches, "\n".join(mismatches[:20])

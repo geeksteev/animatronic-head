@@ -11,12 +11,12 @@
 
 namespace {
 
-constexpr int kSeqMax = 2147483647;  // 2^31 - 1
+constexpr uint64_t kSeqMax = (uint64_t{1} << 53) - 1;
 constexpr double kBlinkDefaultMs = 150.0;
 // Nesting limit for skipped values: one bit per level in a uint64_t. Each level costs at
 // least two bytes, so this can never reject a datagram that fits.
 constexpr int kMaxDepth = 64;
-static_assert(EYE_MAX_DATAGRAM / 2 <= kMaxDepth, "kMaxDepth would reject valid datagrams");
+static_assert(EYE_MAX_PAYLOAD / 2 <= kMaxDepth, "kMaxDepth would reject valid datagrams");
 
 enum class Kind : uint8_t { None, Number, String, True, False, Null, Object, Array };
 
@@ -250,7 +250,7 @@ bool str_is(const Value& v, const char* s) {
 // rejected; tiny ones underflow to 0, like Python's float().
 bool to_finite(const Value& v, double& out) {
     if (v.kind != Kind::Number) return false;
-    char tmp[EYE_MAX_DATAGRAM + 1];
+    char tmp[EYE_MAX_PAYLOAD + 1];
     if (v.len >= sizeof(tmp)) return false;
     memcpy(tmp, v.start, v.len);
     tmp[v.len] = '\0';
@@ -262,16 +262,20 @@ bool to_finite(const Value& v, double& out) {
     return true;
 }
 
-bool valid_seq(const Value& v) {
+bool read_seq(const Value& v, uint64_t& out) {
     if (v.kind != Kind::Number || !v.is_int) return false;
     const char* s = v.start;
     size_t n = v.len;
-    if (s[0] == '-') return n == 2 && s[1] == '0';  // -0 is the integer 0
-    long long acc = 0;
+    if (s[0] == '-') {  // -0 is the integer 0
+        out = 0;
+        return n == 2 && s[1] == '0';
+    }
+    uint64_t acc = 0;
     for (size_t i = 0; i < n; ++i) {
-        acc = acc * 10 + (s[i] - '0');
+        acc = acc * 10 + static_cast<uint64_t>(s[i] - '0');  // acc <= kSeqMax before: no overflow
         if (acc > kSeqMax) return false;
     }
+    out = acc;
     return true;
 }
 
@@ -293,7 +297,7 @@ double round_half_even(double v) {
 }  // namespace
 
 bool parse_command(const char* buf, size_t len, Command& out) {
-    if (buf == nullptr || len > EYE_MAX_DATAGRAM) return false;
+    if (buf == nullptr || len > EYE_MAX_PAYLOAD) return false;
     if (!valid_utf8(reinterpret_cast<const unsigned char*>(buf), len)) return false;
 
     Reader r{buf, buf + len};
@@ -328,7 +332,9 @@ bool parse_command(const char* buf, size_t len, Command& out) {
 
     // v must be the integer 1 (not 1.0, not true).
     if (!(v.kind == Kind::Number && v.is_int && v.len == 1 && v.start[0] == '1')) return false;
-    if (seq.kind != Kind::None && !valid_seq(seq)) return false;
+    out.has_seq = seq.kind != Kind::None;
+    out.seq = 0;
+    if (out.has_seq && !read_seq(seq, out.seq)) return false;
 
     if (str_is(cmd, "look")) {
         double dx, dy;

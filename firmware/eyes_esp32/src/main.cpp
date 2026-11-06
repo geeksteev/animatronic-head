@@ -1,11 +1,12 @@
 // ESP32 eye firmware: receives UDP commands (docs/eye-protocol.md) and drives the 6 eye servos.
-// I/O only. Parsing, motion, rate limiting and fail-safe all live in lib/eye_core.
+// I/O only. Authentication, parsing, motion, rate limiting and fail-safe all live in lib/eye_core.
 #include <Arduino.h>
 #include <ESP32Servo.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <math.h>
 
+#include "eye_auth.h"
 #include "eye_controller.h"
 #include "eye_protocol.h"
 #include "limits_generated.h"
@@ -14,6 +15,10 @@
 #if __has_include("secrets.h")
 #include "secrets.h"
 #define EYES_HAVE_WIFI 1
+#ifndef EYE_AUTH_KEY_HEX
+#error "secrets.h must define EYE_AUTH_KEY_HEX (64 hex characters). See secrets.h.example."
+#endif
+static_assert(sizeof(EYE_AUTH_KEY_HEX) == 2 * EYE_AUTH_KEY_LEN + 1, "EYE_AUTH_KEY_HEX must be 64 hex characters");
 #else
 #warning "include/secrets.h not found: building without Wi-Fi (servos stay at neutral). See secrets.h.example."
 #define EYES_HAVE_WIFI 0
@@ -84,6 +89,9 @@ void write_all() {
 
 #if EYES_HAVE_WIFI
 WiFiUDP udp;
+AuthKey auth_key;
+bool auth_key_ok = false;  // false: Wi-Fi never starts, servos stay at neutral
+ReplayGuard replay_guard;
 bool wifi_up = false;
 uint32_t wifi_attempt_ms = 0;
 char packet[EYE_MAX_DATAGRAM];
@@ -123,8 +131,10 @@ void receive_commands() {
         }
         int len = udp.read(packet, sizeof(packet));
         if (len <= 0) continue;
+        // Unauthenticated, malformed or replayed datagrams are dropped here and never reach
+        // the controller, so they cannot move the servos or reset the fail-safe timer.
         Command cmd;
-        if (parse_command(packet, static_cast<size_t>(len), cmd)) {
+        if (open_command(auth_key, replay_guard, packet, static_cast<size_t>(len), cmd)) {
             dispatch(cmd, controller, millis());
         }
     }
@@ -152,10 +162,15 @@ void setup() {
 #endif
 
 #if EYES_HAVE_WIFI
-    WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true);
-    wifi_begin(millis());
-    Serial.println("[wifi] connecting");
+    auth_key_ok = parse_auth_key(EYE_AUTH_KEY_HEX, auth_key);
+    if (!auth_key_ok) {
+        Serial.println("[auth] EYE_AUTH_KEY_HEX is not 64 hex characters (or is all zeros): Wi-Fi disabled");
+    } else {
+        WiFi.mode(WIFI_STA);
+        WiFi.setAutoReconnect(true);
+        wifi_begin(millis());
+        Serial.println("[wifi] connecting");
+    }
 #else
     Serial.println("[wifi] no secrets.h, Wi-Fi disabled");
 #endif
@@ -164,8 +179,10 @@ void setup() {
 
 void loop() {
 #if EYES_HAVE_WIFI
-    wifi_service(millis());
-    receive_commands();
+    if (auth_key_ok) {
+        wifi_service(millis());
+        receive_commands();
+    }
 #endif
     controller.update(millis());
     report_failsafe();

@@ -12,6 +12,8 @@ def test_constants():
     assert P.PROTOCOL_VERSION == 1
     assert P.DEFAULT_PORT == 4210
     assert P.MAX_DATAGRAM == 128
+    assert (P.TAG_LEN, P.KEY_LEN, P.MAX_PAYLOAD) == (32, 32, 96)
+    assert P.SEQ_MAX == 2**53 - 1
     assert (P.BLINK_MIN_MS, P.BLINK_MAX_MS, P.BLINK_DEFAULT_MS) == (50, 1000, 150)
     assert Blink().ms == 150
     assert issubclass(ProtocolError, ValueError)
@@ -23,7 +25,7 @@ def test_constants():
     "cmd",
     [Look(0.25, -0.5), Look(0, 0), Look(-1, 1), Blink(), Blink(400), Center(), Ping()],
 )
-@pytest.mark.parametrize("seq", [None, 0, 7, 2**31 - 1])
+@pytest.mark.parametrize("seq", [None, 0, 7, 2**31, 2**53 - 1])
 def test_round_trip(cmd, seq):
     assert decode(encode(cmd, seq)) == cmd
 
@@ -132,8 +134,8 @@ def test_decode_rejects_non_finite(data):
 # --- malformed input --------------------------------------------------------
 
 def test_decode_rejects_oversize():
-    pad = b" " * (P.MAX_DATAGRAM - len(b'{"v":1,"cmd":"ping"}'))
-    assert decode(b'{"v":1,"cmd":"ping"}' + pad) == Ping()  # exactly 128 is fine
+    pad = b" " * (P.MAX_PAYLOAD - len(b'{"v":1,"cmd":"ping"}'))
+    assert decode(b'{"v":1,"cmd":"ping"}' + pad) == Ping()  # exactly MAX_PAYLOAD is fine
     with pytest.raises(ProtocolError):
         decode(b'{"v":1,"cmd":"ping"}' + pad + b" ")
 
@@ -193,7 +195,7 @@ def test_decode_rejects_missing_or_non_numeric(data):
     "data",
     [
         b'{"v":1,"seq":-1,"cmd":"ping"}',
-        b'{"v":1,"seq":2147483648,"cmd":"ping"}',
+        b'{"v":1,"seq":9007199254740992,"cmd":"ping"}',
         b'{"v":1,"seq":1.5,"cmd":"ping"}',
         b'{"v":1,"seq":"7","cmd":"ping"}',
     ],
@@ -203,7 +205,7 @@ def test_decode_rejects_bad_seq(data):
         decode(data)
 
 
-@pytest.mark.parametrize("seq", [-1, 2**31, 1.0, "7", True])
+@pytest.mark.parametrize("seq", [-1, 2**53, 1.0, "7", True])
 def test_encode_rejects_bad_seq(seq):
     with pytest.raises(ProtocolError):
         encode(Ping(), seq)
@@ -218,17 +220,18 @@ def test_encode_rejects_bad_command(cmd):
 # --- size bound -------------------------------------------------------------
 
 WORST_VALUES = [-1, 1, 0, -0.999, -0.001, 0.123, -0.5, -1e300, 1e300]
-WORST_SEQS = [None, 0, 2**31 - 1]
+WORST_SEQS = [None, 0, 2**53 - 1]
 
 
 def test_every_encoded_datagram_fits():
     cmds = [Look(x, y) for x, y in itertools.product(WORST_VALUES, repeat=2)]
     cmds += [Blink(ms) for ms in (0, 50, 999, 1000, 10**9)] + [Center(), Ping()]
     for cmd, seq in itertools.product(cmds, WORST_SEQS):
-        assert len(encode(cmd, seq)) <= P.MAX_DATAGRAM
+        assert len(encode(cmd, seq)) <= P.MAX_PAYLOAD
 
 
 def test_worst_case_look_size():
-    data = encode(Look(-0.999, -0.999), 2**31 - 1)
-    assert len(data) <= P.MAX_DATAGRAM
-    assert len(encode(Look(-1, -1), 2**31 - 1)) <= P.MAX_DATAGRAM
+    data = encode(Look(-0.999, -0.999), 2**53 - 1)
+    assert len(data) == 65  # the size quoted in docs/eye-protocol.md
+    assert len(data) + P.TAG_LEN <= P.MAX_DATAGRAM
+    assert len(encode(Look(-1, -1), 2**53 - 1)) <= P.MAX_PAYLOAD
