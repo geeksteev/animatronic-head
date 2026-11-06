@@ -13,8 +13,10 @@ namespace {
 
 constexpr int kSeqMax = 2147483647;  // 2^31 - 1
 constexpr double kBlinkDefaultMs = 150.0;
-// Each nesting level costs at least two bytes, so this can never reject a datagram that fits.
-constexpr int kMaxDepth = EYE_MAX_DATAGRAM / 2 + 1;
+// Nesting limit for skipped values: one bit per level in a uint64_t. Each level costs at
+// least two bytes, so this can never reject a datagram that fits.
+constexpr int kMaxDepth = 64;
+static_assert(EYE_MAX_DATAGRAM / 2 <= kMaxDepth, "kMaxDepth would reject valid datagrams");
 
 enum class Kind : uint8_t { None, Number, String, True, False, Null, Object, Array };
 
@@ -175,43 +177,68 @@ bool scan_literal(Reader& r, const char* word, Kind kind, Value& out) {
     return true;
 }
 
-bool scan_value(Reader& r, Value& out, int depth);
-
-// Generic (unknown-key) object or array: validate and discard.
-bool skip_container(Reader& r, int depth, Value& out) {
-    if (depth >= kMaxDepth) return false;
-    bool is_obj = r.peek() == '{';
-    ++r.p;
-    out.kind = is_obj ? Kind::Object : Kind::Array;
-    const char close = is_obj ? '}' : ']';
-    r.skip_ws();
-    if (r.eat(close)) return true;
-    while (true) {
-        Value tmp;
-        if (is_obj) {
-            r.skip_ws();
-            if (!scan_string(r, tmp)) return false;
-            r.skip_ws();
-            if (!r.eat(':')) return false;
-        }
-        r.skip_ws();
-        if (!scan_value(r, tmp, depth + 1)) return false;
-        r.skip_ws();
-        if (r.eat(close)) return true;
-        if (!r.eat(',')) return false;
-    }
-}
-
-bool scan_value(Reader& r, Value& out, int depth) {
+// String, number or literal (anything but an object or array).
+bool scan_scalar(Reader& r, Value& out) {
     switch (r.peek()) {
         case '"': return scan_string(r, out);
-        case '{':
-        case '[': return skip_container(r, depth, out);
         case 't': return scan_literal(r, "true", Kind::True, out);
         case 'f': return scan_literal(r, "false", Kind::False, out);
         case 'n': return scan_literal(r, "null", Kind::Null, out);
         default: return scan_number(r, out);
     }
+}
+
+// Generic (unknown-key) object or array starting at '{' or '[': validate and discard.
+// Iterative, so stack use does not depend on the input: one bit per open level records
+// whether it is an object (bit set) or an array.
+bool skip_container(Reader& r, Value& out) {
+    out.kind = r.peek() == '{' ? Kind::Object : Kind::Array;
+    uint64_t obj_bits = 0;
+    int depth = 0;  // number of open levels
+    Value tmp;
+    auto top_is_obj = [&]() { return ((obj_bits >> (depth - 1)) & 1u) != 0; };
+    while (true) {
+        // r.p is at '{' or '[': open a level.
+        if (depth >= kMaxDepth) return false;
+        const bool is_obj = *r.p++ == '{';
+        const uint64_t bit = uint64_t{1} << depth;
+        obj_bits = is_obj ? (obj_bits | bit) : (obj_bits & ~bit);
+        ++depth;
+        r.skip_ws();
+        bool need_value = !r.eat(is_obj ? '}' : ']');
+        while (true) {
+            if (need_value) {
+                // One member/element of the innermost open level.
+                if (top_is_obj()) {
+                    if (!scan_string(r, tmp)) return false;
+                    r.skip_ws();
+                    if (!r.eat(':')) return false;
+                    r.skip_ws();
+                }
+                const char c = r.peek();
+                if (c == '{' || c == '[') break;  // descend: the outer loop opens it
+                if (!scan_scalar(r, tmp)) return false;
+            } else {
+                // The innermost level just closed; that completes a value in its parent.
+                if (--depth == 0) return true;
+            }
+            r.skip_ws();
+            if (r.eat(',')) {
+                r.skip_ws();
+                need_value = true;
+            } else if (r.eat(top_is_obj() ? '}' : ']')) {
+                need_value = false;
+            } else {
+                return false;
+            }
+        }
+    }
+}
+
+bool scan_value(Reader& r, Value& out) {
+    const char c = r.peek();
+    if (c == '{' || c == '[') return skip_container(r, out);
+    return scan_scalar(r, out);
 }
 
 bool str_is(const Value& v, const char* s) {
@@ -284,7 +311,7 @@ bool parse_command(const char* buf, size_t len, Command& out) {
             if (!r.eat(':')) return false;
             r.skip_ws();
             Value val;
-            if (!scan_value(r, val, 1)) return false;
+            if (!scan_value(r, val)) return false;
             if (str_is(key, "v")) v = val;
             else if (str_is(key, "seq")) seq = val;
             else if (str_is(key, "cmd")) cmd = val;
