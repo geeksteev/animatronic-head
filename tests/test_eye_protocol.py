@@ -5,7 +5,7 @@ import math
 import pytest
 
 from brain import eye_protocol as P
-from brain.eye_protocol import Blink, Center, Look, Ping, ProtocolError, decode, encode
+from brain.eye_protocol import Blink, Center, Look, Ping, ProtocolError, Servo, decode, encode
 
 
 def test_constants():
@@ -16,6 +16,7 @@ def test_constants():
     assert P.SEQ_MAX == 2**53 - 1
     assert (P.BLINK_MIN_MS, P.BLINK_MAX_MS, P.BLINK_DEFAULT_MS) == (50, 1000, 150)
     assert Blink().ms == 150
+    assert (P.SERVO_COUNT, P.SERVO_DEG_MIN, P.SERVO_DEG_MAX) == (6, 0, 180)
     assert issubclass(ProtocolError, ValueError)
 
 
@@ -23,7 +24,8 @@ def test_constants():
 
 @pytest.mark.parametrize(
     "cmd",
-    [Look(0.25, -0.5), Look(0, 0), Look(-1, 1), Blink(), Blink(400), Center(), Ping()],
+    [Look(0.25, -0.5), Look(0, 0), Look(-1, 1), Blink(), Blink(400), Center(), Ping(),
+     Servo(0, 90), Servo(2, 95.5), Servo(5, 0), Servo(1, 180), Servo(3, 12.345)],
 )
 @pytest.mark.parametrize("seq", [None, 0, 7, 2**31, 2**53 - 1])
 def test_round_trip(cmd, seq):
@@ -36,6 +38,7 @@ def test_exact_wire_format_matches_spec_examples():
     assert encode(Center(), 9) == b'{"v":1,"seq":9,"cmd":"center"}'
     assert encode(Ping(), 10) == b'{"v":1,"seq":10,"cmd":"ping"}'
     assert encode(Ping()) == b'{"v":1,"cmd":"ping"}'
+    assert encode(Servo(2, 95.5), 11) == b'{"v":1,"seq":11,"cmd":"servo","ch":2,"deg":95.5}'
 
 
 def test_key_order():
@@ -48,6 +51,7 @@ def test_decode_spec_examples():
     assert decode(b'{"v":1,"seq":8,"cmd":"blink","ms":150}') == Blink(150)
     assert decode(b'{"v":1,"seq":9,"cmd":"center"}') == Center()
     assert decode(b'{"v":1,"seq":10,"cmd":"ping"}') == Ping()
+    assert decode(b'{"v":1,"seq":11,"cmd":"servo","ch":2,"deg":95.5}') == Servo(2, 95.5)
 
 
 def test_decode_seq_optional_and_extra_keys_ignored():
@@ -217,6 +221,69 @@ def test_encode_rejects_bad_command(cmd):
         encode(cmd)
 
 
+# --- servo ------------------------------------------------------------------
+
+def test_servo_key_order_and_format():
+    data = encode(Servo(4, 100), 3)
+    assert list(json.loads(data)) == ["v", "seq", "cmd", "ch", "deg"]
+    assert data == b'{"v":1,"seq":3,"cmd":"servo","ch":4,"deg":100}'
+    assert encode(Servo(0, 12.3456)).endswith(b'"deg":12.346}')
+    assert encode(Servo(0, -0.0001)).endswith(b'"deg":0}')
+
+
+@pytest.mark.parametrize("deg, clamped", [(-5, 0), (0, 0), (180, 180), (500, 180), (1e300, 180)])
+def test_servo_deg_clamped(deg, clamped):
+    assert decode(encode(Servo(1, deg))) == Servo(1, clamped)
+    assert decode(b'{"v":1,"cmd":"servo","ch":1,"deg":%s}' % str(deg).encode()) == Servo(1, clamped)
+
+
+def test_servo_decode_accepts_any_int_spelling_of_ch():
+    assert decode(b'{"v":1,"cmd":"servo","ch":-0,"deg":1}') == Servo(0, 1)
+    assert decode(b'{"deg":1,"ch":5,"cmd":"servo","v":1}') == Servo(5, 1)
+
+
+@pytest.mark.parametrize("ch", [True, False, 1.0, 2.5, -1, 6, 100, "2", None])
+def test_servo_encode_rejects_bad_ch(ch):
+    with pytest.raises(ProtocolError):
+        encode(Servo(ch, 90))
+
+
+@pytest.mark.parametrize("deg", [math.nan, math.inf, -math.inf, True, "90", None])
+def test_servo_encode_rejects_bad_deg(deg):
+    with pytest.raises(ProtocolError):
+        encode(Servo(0, deg))
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b'{"v":1,"cmd":"servo","ch":true,"deg":90}',
+        b'{"v":1,"cmd":"servo","ch":false,"deg":90}',
+        b'{"v":1,"cmd":"servo","ch":1.0,"deg":90}',
+        b'{"v":1,"cmd":"servo","ch":1e0,"deg":90}',
+        b'{"v":1,"cmd":"servo","ch":0.5,"deg":90}',
+        b'{"v":1,"cmd":"servo","ch":-1,"deg":90}',
+        b'{"v":1,"cmd":"servo","ch":6,"deg":90}',
+        b'{"v":1,"cmd":"servo","ch":10,"deg":90}',
+        b'{"v":1,"cmd":"servo","ch":"2","deg":90}',
+        b'{"v":1,"cmd":"servo","ch":null,"deg":90}',
+        b'{"v":1,"cmd":"servo","deg":90}',
+        b'{"v":1,"cmd":"servo","ch":2}',
+        b'{"v":1,"cmd":"servo"}',
+        b'{"v":1,"cmd":"servo","ch":2,"deg":NaN}',
+        b'{"v":1,"cmd":"servo","ch":2,"deg":Infinity}',
+        b'{"v":1,"cmd":"servo","ch":2,"deg":-Infinity}',
+        b'{"v":1,"cmd":"servo","ch":2,"deg":1e999}',
+        b'{"v":1,"cmd":"servo","ch":2,"deg":"90"}',
+        b'{"v":1,"cmd":"servo","ch":2,"deg":true}',
+        b'{"v":1,"cmd":"servo","ch":2,"deg":null}',
+    ],
+)
+def test_servo_decode_rejects(data):
+    with pytest.raises(ProtocolError):
+        decode(data)
+
+
 # --- size bound -------------------------------------------------------------
 
 WORST_VALUES = [-1, 1, 0, -0.999, -0.001, 0.123, -0.5, -1e300, 1e300]
@@ -226,6 +293,8 @@ WORST_SEQS = [None, 0, 2**53 - 1]
 def test_every_encoded_datagram_fits():
     cmds = [Look(x, y) for x, y in itertools.product(WORST_VALUES, repeat=2)]
     cmds += [Blink(ms) for ms in (0, 50, 999, 1000, 10**9)] + [Center(), Ping()]
+    cmds += [Servo(ch, deg) for ch in range(P.SERVO_COUNT)
+             for deg in (0, 179.999, 180, 99.999, -1e300, 1e300)]
     for cmd, seq in itertools.product(cmds, WORST_SEQS):
         assert len(encode(cmd, seq)) <= P.MAX_PAYLOAD
 
@@ -235,3 +304,9 @@ def test_worst_case_look_size():
     assert len(data) == 65  # the size quoted in docs/eye-protocol.md
     assert len(data) + P.TAG_LEN <= P.MAX_DATAGRAM
     assert len(encode(Look(-1, -1), 2**53 - 1)) <= P.MAX_PAYLOAD
+
+
+def test_worst_case_servo_size():
+    data = encode(Servo(5, 179.999), 2**53 - 1)
+    assert len(data) == 65  # the size quoted in docs/eye-protocol.md
+    assert len(data) + P.TAG_LEN <= P.MAX_DATAGRAM

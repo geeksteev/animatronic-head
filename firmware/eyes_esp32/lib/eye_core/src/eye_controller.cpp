@@ -84,6 +84,15 @@ void EyeController::center(uint32_t now_ms) {
 
 void EyeController::ping(uint32_t now_ms) { record_command(now_ms); }
 
+void EyeController::set_servo(int idx, float deg, uint32_t now_ms) {
+    if (idx < 0 || idx >= kServoCount || !isfinite(deg)) return;
+    // Cancel the blink so update() does not reopen the lids over this target. The other lids
+    // keep whatever target they had.
+    if (idx >= kFirstLid) blinking_ = false;
+    target_[idx] = clamp_to(cfg_for(idx), deg);
+    record_command(now_ms);
+}
+
 void EyeController::update(uint32_t now_ms) {
     // Fail-safe. Unsigned subtraction handles millis() wraparound. Once entered, fail-safe
     // latches until the next valid command, so a silence longer than 2^32 ms cannot wrap

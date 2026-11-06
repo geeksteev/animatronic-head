@@ -6,8 +6,8 @@
 //                          the whole run, as on the head
 //
 // Reads one hex-encoded input per line (hex so any bytes, including newlines, can be sent)
-// and prints one result line per input: "look X Y", "blink MS", "center", "ping" or
-// "invalid". In KEY_HEX mode accepted lines are prefixed with "SEQ ".
+// and prints one result line per input: "look X Y", "blink MS", "center", "ping",
+// "servo CH DEG" or "invalid". In KEY_HEX mode accepted lines are prefixed with "SEQ ".
 #include <stdio.h>
 #include <string.h>
 
@@ -53,6 +53,7 @@ int main(int argc, char** argv) {
                 case CmdType::Blink: printf("blink %u\n", static_cast<unsigned>(c.blink_ms)); break;
                 case CmdType::Center: printf("center\n"); break;
                 case CmdType::Ping: printf("ping\n"); break;
+                case CmdType::Servo: printf("servo %u %.3f\n", static_cast<unsigned>(c.ch), c.deg); break;
             }
         }
         fflush(stdout);
