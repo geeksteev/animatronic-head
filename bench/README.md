@@ -51,3 +51,25 @@ Full frame layout is in the module docstring.
 - The function/range table was transcribed from a photo of the manual and needs
   verification (pages 11-12).
 - Byte-3 special codes (manual section 3.5) are not decoded; they report `value = null`.
+
+## Camera (Logitech C922)
+
+`bench/camera.py` captures frames of the eye mechanism with auto exposure, autofocus and
+auto white balance off, so frames are comparable between runs. Needs OpenCV
+(`pip install -e '.[bench]'`); `import bench.camera` itself does not.
+
+```python
+from bench.camera import CameraSettings, OpenCVCamera
+
+with OpenCVCamera(CameraSettings(exposure=200, focus=40)) as cam:
+    print(cam.applied_settings())   # values read back from the driver
+    frame = cam.read()              # Frame(index, t, image: uint8 HxWx3 BGR)
+```
+
+- Opens `/dev/video0` with the V4L2 backend at 640x480 MJPG @ 30 fps by default; the manual
+  defaults (exposure, gain, focus, white balance) are documented on `CameraSettings`.
+- Every property is read back after setting. Any that did not take raise `CameraError`
+  (`strict=False` prints a warning instead). `v4l2-ctl -d /dev/video0 -L` shows valid ranges.
+- The first `warmup_frames` (30) frames are discarded while the sensor settles.
+- `FakeCamera(source, clock)` is a deterministic stand-in for tests; `source` is a list of
+  images or a callable `(t) -> image`.
