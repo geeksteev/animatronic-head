@@ -26,6 +26,9 @@ MAX_PAYLOAD = MAX_DATAGRAM - TAG_LEN
 BLINK_MIN_MS = 50
 BLINK_MAX_MS = 1000
 BLINK_DEFAULT_MS = 150
+SERVO_COUNT = 6  # servo channels 0..5: pan, tilt, then the 4 lids (see docs/eye-protocol.md)
+SERVO_DEG_MIN = 0.0
+SERVO_DEG_MAX = 180.0
 
 SEQ_MIN = 0
 SEQ_MAX = 2**53 - 1  # exact in a double; the head stores it as uint64
@@ -60,7 +63,15 @@ class Ping:
     pass
 
 
-Command = Union[Look, Blink, Center, Ping]
+@dataclass(frozen=True)
+class Servo:
+    """Set one servo's target angle. ``ch``: 0 pan, 1 tilt, 2..5 lids (see the protocol doc)."""
+
+    ch: int
+    deg: float
+
+
+Command = Union[Look, Blink, Center, Ping, Servo]
 
 
 def _number(value: object, name: str) -> float:
@@ -88,6 +99,21 @@ def _blink_ms(value: object) -> int:
     return int(round(f))
 
 
+def _channel(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ProtocolError(f"ch must be an integer, got {type(value).__name__}")
+    if not 0 <= value < SERVO_COUNT:
+        raise ProtocolError(f"ch must be in [0, {SERVO_COUNT - 1}]")
+    return value
+
+
+def _deg(value: object) -> float:
+    """Clamp to ``[SERVO_DEG_MIN, SERVO_DEG_MAX]`` and round to 3 decimals."""
+    f = max(SERVO_DEG_MIN, min(SERVO_DEG_MAX, _number(value, "deg")))
+    f = round(f, 3)
+    return 0.0 if f == 0 else f
+
+
 def _seq(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ProtocolError(f"seq must be an integer, got {type(value).__name__}")
@@ -105,9 +131,10 @@ def _fmt(f: float) -> str:
 def encode(cmd: Command, seq: int | None = None) -> bytes:
     """Encode ``cmd`` as a datagram. Keys are written in the order v, seq, cmd, ...
 
-    Clamps x/y to ``[-1, 1]`` and ms to ``[BLINK_MIN_MS, BLINK_MAX_MS]``.
-    Raises ProtocolError for NaN/inf, non-numeric fields, a bad ``seq`` or an
-    unknown command type.
+    Clamps x/y to ``[-1, 1]``, ms to ``[BLINK_MIN_MS, BLINK_MAX_MS]`` and deg to
+    ``[SERVO_DEG_MIN, SERVO_DEG_MAX]``. Raises ProtocolError for NaN/inf,
+    non-numeric fields, a ``ch`` that is not an integer in ``[0, SERVO_COUNT)``,
+    a bad ``seq`` or an unknown command type.
     """
     parts = [f'"v":{PROTOCOL_VERSION}']
     if seq is not None:
@@ -122,6 +149,9 @@ def encode(cmd: Command, seq: int | None = None) -> bytes:
         parts.append('"cmd":"center"')
     elif isinstance(cmd, Ping):
         parts.append('"cmd":"ping"')
+    elif isinstance(cmd, Servo):
+        ch, deg = _channel(cmd.ch), _deg(cmd.deg)
+        parts += ['"cmd":"servo"', f'"ch":{ch}', f'"deg":{_fmt(deg)}']
     else:
         raise ProtocolError(f"unknown command type {type(cmd).__name__}")
 
@@ -140,7 +170,8 @@ def decode(data: bytes) -> Command:
 
     Raises ProtocolError for oversize input, invalid UTF-8 or JSON, a wrong or
     missing ``v``, an invalid ``seq``, an unknown ``cmd``, missing or
-    non-numeric fields, or non-finite values. Unknown extra keys are ignored.
+    non-numeric fields, non-finite values, or a ``ch`` that is not an integer
+    in ``[0, SERVO_COUNT)``. Unknown extra keys are ignored.
     """
     return _decode(data)[1]
 
@@ -174,6 +205,11 @@ def _decode(data: bytes) -> tuple[int | None, Command]:
         return seq, Center()
     if name == "ping":
         return seq, Ping()
+    if name == "servo":
+        for field in ("ch", "deg"):
+            if field not in obj:
+                raise ProtocolError(f"servo: missing {field}")
+        return seq, Servo(_channel(obj["ch"]), _deg(obj["deg"]))
     raise ProtocolError(f"unknown cmd {name!r}")
 
 

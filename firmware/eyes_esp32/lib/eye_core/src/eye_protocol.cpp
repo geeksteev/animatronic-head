@@ -13,6 +13,9 @@ namespace {
 
 constexpr uint64_t kSeqMax = (uint64_t{1} << 53) - 1;
 constexpr double kBlinkDefaultMs = 150.0;
+constexpr double kServoDegMin = 0.0;
+constexpr double kServoDegMax = 180.0;
+static_assert(EyeController::kServoCount <= 10, "read_channel only parses one digit");
 // Nesting limit for skipped values: one bit per level in a uint64_t. Each level costs at
 // least two bytes, so this can never reject a datagram that fits.
 constexpr int kMaxDepth = 64;
@@ -279,6 +282,23 @@ bool read_seq(const Value& v, uint64_t& out) {
     return true;
 }
 
+// A servo channel: an integer (not 1.0, not 1e0) in [0, kServoCount). -0 is the integer 0.
+bool read_channel(const Value& v, uint8_t& out) {
+    if (v.kind != Kind::Number || !v.is_int) return false;
+    const char* s = v.start;
+    size_t n = v.len;
+    if (s[0] == '-') {
+        out = 0;
+        return n == 2 && s[1] == '0';
+    }
+    // JSON forbids leading zeros, so more than one digit means >= 10.
+    if (n != 1) return false;
+    int c = s[0] - '0';
+    if (c >= EyeController::kServoCount) return false;
+    out = static_cast<uint8_t>(c);
+    return true;
+}
+
 double clampd(double v, double lo, double hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
@@ -301,7 +321,7 @@ bool parse_command(const char* buf, size_t len, Command& out) {
     if (!valid_utf8(reinterpret_cast<const unsigned char*>(buf), len)) return false;
 
     Reader r{buf, buf + len};
-    Value v, seq, cmd, x, y, ms;  // last occurrence wins
+    Value v, seq, cmd, x, y, ms, ch, deg;  // last occurrence wins
 
     r.skip_ws();
     if (!r.eat('{')) return false;
@@ -322,6 +342,8 @@ bool parse_command(const char* buf, size_t len, Command& out) {
             else if (str_is(key, "x")) x = val;
             else if (str_is(key, "y")) y = val;
             else if (str_is(key, "ms")) ms = val;
+            else if (str_is(key, "ch")) ch = val;
+            else if (str_is(key, "deg")) deg = val;
             r.skip_ws();
             if (r.eat('}')) break;
             if (!r.eat(',')) return false;
@@ -336,13 +358,17 @@ bool parse_command(const char* buf, size_t len, Command& out) {
     out.seq = 0;
     if (out.has_seq && !read_seq(seq, out.seq)) return false;
 
+    out.x = out.y = 0.0f;
+    out.blink_ms = 0;
+    out.ch = 0;
+    out.deg = 0.0f;
+
     if (str_is(cmd, "look")) {
         double dx, dy;
         if (!to_finite(x, dx) || !to_finite(y, dy)) return false;
         out.type = CmdType::Look;
         out.x = static_cast<float>(clampd(dx, -1.0, 1.0));
         out.y = static_cast<float>(clampd(dy, -1.0, 1.0));
-        out.blink_ms = 0;
         return true;
     }
     if (str_is(cmd, "blink")) {
@@ -350,14 +376,18 @@ bool parse_command(const char* buf, size_t len, Command& out) {
         if (ms.kind != Kind::None && !to_finite(ms, d)) return false;
         d = clampd(d, EyeController::kBlinkMinMs, EyeController::kBlinkMaxMs);
         out.type = CmdType::Blink;
-        out.x = out.y = 0.0f;
         out.blink_ms = static_cast<uint16_t>(round_half_even(d));
         return true;
     }
     if (str_is(cmd, "center") || str_is(cmd, "ping")) {
         out.type = str_is(cmd, "center") ? CmdType::Center : CmdType::Ping;
-        out.x = out.y = 0.0f;
-        out.blink_ms = 0;
+        return true;
+    }
+    if (str_is(cmd, "servo")) {
+        double d;
+        if (!read_channel(ch, out.ch) || !to_finite(deg, d)) return false;
+        out.type = CmdType::Servo;
+        out.deg = static_cast<float>(clampd(d, kServoDegMin, kServoDegMax));
         return true;
     }
     return false;
@@ -369,5 +399,6 @@ void dispatch(const Command& cmd, EyeController& ctrl, uint32_t now_ms) {
         case CmdType::Blink: ctrl.blink(cmd.blink_ms, now_ms); break;
         case CmdType::Center: ctrl.center(now_ms); break;
         case CmdType::Ping: ctrl.ping(now_ms); break;
+        case CmdType::Servo: ctrl.set_servo(cmd.ch, cmd.deg, now_ms); break;
     }
 }

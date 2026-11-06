@@ -347,6 +347,130 @@ static void test_wraparound() {
     }
 }
 
+static void test_set_servo_clamped_and_rate_limited() {
+    EyeConfig c = make_cfg();
+    for (int i = 0; i < 6; ++i) {
+        const ServoCfg& s = servo(c, i);
+        EyeController e(c);
+        uint32_t t = 0;
+        e.ping(t);
+        e.update(t);
+        // Above max: the first step is limited to max_speed_dps * dt, then it settles at max.
+        e.set_servo(i, 500.0f, t);
+        t += 10;
+        e.update(t);
+        CHECK_NEAR(e.angle(i), fminf(s.neutral_deg + s.max_speed_dps * 0.01f, s.max_deg), EPS);
+        t = run(e, t, 400);
+        CHECK_NEAR(e.angle(i), s.max_deg, EPS);
+        // Below min.
+        e.set_servo(i, -500.0f, t);
+        float before = e.angle(i);
+        t += 10;
+        e.ping(t);
+        e.update(t);
+        CHECK(fabsf(e.angle(i) - before) <= s.max_speed_dps * 0.01f + EPS);
+        t = run(e, t, 400);
+        CHECK_NEAR(e.angle(i), s.min_deg, EPS);
+        // In range: exact.
+        float mid = 0.5f * (s.min_deg + s.max_deg) + 0.25f;
+        e.set_servo(i, mid, t);
+        t = run(e, t, 400);
+        CHECK_NEAR(e.angle(i), mid, EPS);
+        // Only servo i moved.
+        for (int j = 0; j < 6; ++j) {
+            if (j != i) CHECK_NEAR(e.angle(j), servo(c, j).neutral_deg, EPS);
+        }
+    }
+}
+
+static void test_set_servo_lid_cancels_blink() {
+    EyeConfig c = make_cfg();
+    EyeController e(c);
+    uint32_t t = 0;
+    e.ping(t);
+    e.update(t);
+    e.blink(300, t);
+    t = run(e, t, 100);  // all lids closed
+    // Move lid 1 (lower_left, index 3) during the blink.
+    e.set_servo(3, 95.0f, t);
+    t = run(e, t, 400);  // well past when the blink would have reopened the lids
+    CHECK_NEAR(e.angle(3), 95.0f, EPS);
+    // The other lids hold their targets (closed): the cancelled blink does not reopen them.
+    for (int l = 0; l < 4; ++l) {
+        if (l == 1) continue;
+        const ServoCfg& s = c.lids[l];
+        CHECK_NEAR(e.angle(2 + l), c.lid_closed_at_max[l] ? s.max_deg : s.min_deg, EPS);
+    }
+    // center resets everything.
+    e.center(t);
+    t = run(e, t, 400);
+    for (int i = 0; i < 6; ++i) CHECK_NEAR(e.angle(i), servo(c, i).neutral_deg, EPS);
+
+    // A pan/tilt servo command does not cancel a blink.
+    e.blink(200, t);
+    e.set_servo(0, 100.0f, t);
+    t = run(e, t, 100);
+    CHECK_NEAR(e.angle(2), c.lids[0].max_deg, EPS);
+    t = run(e, t, 300);
+    CHECK_NEAR(e.angle(2), c.lids[0].neutral_deg, EPS);
+    CHECK_NEAR(e.angle(0), 100.0f, EPS);
+}
+
+static void test_set_servo_then_look_and_failsafe() {
+    EyeConfig c = make_cfg();
+    EyeController e(c);
+    uint32_t t = 0;
+    e.set_servo(0, 70.0f, t);
+    CHECK(!e.in_failsafe());  // a valid command
+    e.set_servo(1, 110.0f, t);
+    for (int i = 2; i < 6; ++i) e.set_servo(i, servo(c, i).min_deg, t);
+    t = run(e, t, 400);
+    CHECK_NEAR(e.angle(0), 70.0f, EPS);
+    CHECK_NEAR(e.angle(1), 110.0f, EPS);
+    // look overrides pan/tilt but leaves the lids.
+    e.look(0.0f, 0.0f, t);
+    t = run(e, t, 400);
+    CHECK_NEAR(e.angle(0), c.pan.neutral_deg, EPS);
+    CHECK_NEAR(e.angle(1), c.tilt.neutral_deg, EPS);
+    for (int i = 2; i < 6; ++i) CHECK_NEAR(e.angle(i), servo(c, i).min_deg, EPS);
+    // Fail-safe: every servo back to neutral.
+    for (int i = 0; i < 6; ++i) e.set_servo(i, servo(c, i).max_deg, t);
+    t = run(e, t, 1500, 10, false);
+    CHECK(e.in_failsafe());
+    for (int i = 0; i < 6; ++i) CHECK_NEAR(e.angle(i), servo(c, i).neutral_deg, EPS);
+}
+
+static void test_set_servo_invalid_ignored() {
+    EyeConfig c = make_cfg();
+    EyeController e(c);
+    uint32_t t = 0;
+    // Invalid index or non-finite angle: no motion, and not a command (stays in fail-safe).
+    e.set_servo(-1, 100.0f, t);
+    e.set_servo(6, 100.0f, t);
+    e.set_servo(1000, 100.0f, t);
+    e.set_servo(0, NAN, t);
+    e.set_servo(2, INFINITY, t);
+    e.set_servo(3, -INFINITY, t);
+    CHECK(e.in_failsafe());
+    t = run(e, t, 400, 10, false);
+    for (int i = 0; i < 6; ++i) CHECK_NEAR(e.angle(i), servo(c, i).neutral_deg, EPS);
+
+    // Ignored while running too: targets unchanged, and it does not hold off the fail-safe.
+    EyeController f(c);
+    uint32_t u = 0;
+    f.ping(u);
+    f.update(u);
+    for (int k = 0; k < 100; ++k) {
+        u += 10;
+        f.set_servo(6, 100.0f, u);
+        f.set_servo(-1, 100.0f, u);
+        f.set_servo(0, NAN, u);
+        f.update(u);
+    }
+    CHECK(f.in_failsafe());
+    for (int i = 0; i < 6; ++i) CHECK_NEAR(f.angle(i), servo(c, i).neutral_deg, EPS);
+}
+
 // Deterministic LCG so failures are reproducible.
 static uint32_t g_rng = 12345u;
 static uint32_t rnd() {
@@ -363,13 +487,15 @@ static void test_randomized_within_limits() {
         uint32_t t = rnd() << 8;  // random start, including near wraparound
         int out_of_range = 0;
         for (int step = 0; step < 5000; ++step) {
-            switch (rnd() % 7) {
+            switch (rnd() % 9) {
                 case 0: e.look(rndf(-3.0f, 3.0f), rndf(-3.0f, 3.0f), t); break;
                 case 1: e.look(rndf(-1.0f, 1.0f), rndf(-1.0f, 1.0f), t); break;
                 case 2: e.blink((uint16_t)(rnd() & 0xFFFF), t); break;
                 case 3: e.center(t); break;
                 case 4: e.ping(t); break;
                 case 5: e.look(NAN, rndf(-1.0f, 1.0f), t); break;
+                case 6: e.set_servo((int)(rnd() % 8) - 1, rndf(-200.0f, 400.0f), t); break;
+                case 7: e.set_servo((int)(rnd() % 6), rndf(0.0f, 180.0f), t); break;
                 default: break;
             }
             t += rnd() % 120;  // includes dt=0 and gaps beyond the timeout
@@ -394,6 +520,10 @@ int main() {
     test_center();
     test_failsafe();
     test_wraparound();
+    test_set_servo_clamped_and_rate_limited();
+    test_set_servo_lid_cancels_blink();
+    test_set_servo_then_look_and_failsafe();
+    test_set_servo_invalid_ignored();
     test_randomized_within_limits();
     if (g_failures) {
         fprintf(stderr, "%d of %d checks FAILED\n", g_failures, g_checks);

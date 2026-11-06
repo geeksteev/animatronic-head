@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 from brain import eye_client, eye_protocol
-from brain.eye_protocol import Blink, Center, Look, Ping
-from brain.limits import load_limits
+from brain.eye_protocol import Blink, Center, Look, Ping, Servo
+from brain.limits import UnknownServoError, load_limits
 
 ROOT = Path(__file__).resolve().parent.parent
 KEY = bytes(range(1, 33))
@@ -94,6 +94,74 @@ def test_nan_raises_and_sends_nothing(client, head):
     with pytest.raises(ValueError):
         client.blink(math.inf)
     assert _drain(head, 0.05) == []
+
+
+class FakeSocket:
+    """Records sendto() calls instead of sending."""
+
+    def __init__(self):
+        self.sent = []
+
+    def sendto(self, data, addr):
+        self.sent.append((data, addr))
+        return len(data)
+
+    def close(self):
+        pass
+
+
+def _fake_client(limits, sock):
+    return eye_client.EyeClient("head.invalid", limits=limits, sock=sock, key=KEY)
+
+
+def test_servo_clamps_to_loaded_limits_with_fake_socket():
+    limits = load_limits()  # the repo's config/limits.yaml
+    sock = FakeSocket()
+    with _fake_client(limits, sock) as c:
+        assert c.limits is limits
+        seq = c.servo("eye_pan", 500)
+    assert len(sock.sent) == 1
+    data, addr = sock.sent[0]
+    assert addr == ("head.invalid", eye_protocol.DEFAULT_PORT)
+    got_seq, cmd = eye_protocol.decode_signed(data, KEY)
+    assert got_seq == seq
+    assert cmd == Servo(limits["eye_pan"].channel, limits["eye_pan"].max)
+
+
+def test_servo_uses_channel_and_min(tmp_path):
+    p = tmp_path / "limits.yaml"
+    p.write_text(
+        "failsafe:\n  command_timeout_ms: 500\nservos:\n"
+        "  lid_lower_right: { channel: 5, min: 80, max: 110, neutral: 90, max_speed_dps: 600 }\n"
+    )
+    sock = FakeSocket()
+    with _fake_client(load_limits(p), sock) as c:
+        c.servo("lid_lower_right", -20)
+        c.servo("lid_lower_right", 95.5)
+    cmds = [eye_protocol.decode_signed(d, KEY)[1] for d, _ in sock.sent]
+    assert cmds == [Servo(5, 80), Servo(5, 95.5)]
+
+
+def test_servo_over_udp(client, head):
+    client.servo("eye_pan", 100)
+    assert _recv(head)[0] == Servo(0, 100)
+
+
+@pytest.mark.parametrize("deg", [math.nan, math.inf, -math.inf])
+def test_servo_non_finite_raises_and_sends_nothing(tmp_path, deg):
+    sock = FakeSocket()
+    with _fake_client(_limits(tmp_path, "failsafe:\n  command_timeout_ms: 500\n"), sock) as c:
+        with pytest.raises(ValueError):
+            c.servo("eye_pan", deg)
+    assert sock.sent == []
+
+
+def test_servo_unknown_name_raises_and_sends_nothing(tmp_path):
+    sock = FakeSocket()
+    with _fake_client(_limits(tmp_path, "failsafe:\n  command_timeout_ms: 500\n"), sock) as c:
+        with pytest.raises(UnknownServoError):
+            c.servo("eye_roll", 90)
+    assert sock.sent == []
 
 
 def test_heartbeat_pings_when_idle_and_stops_on_close(tmp_path, head):

@@ -45,6 +45,40 @@ static void expect_blink(const char* s, unsigned ms) {
     }
 }
 
+static void expect_servo(const char* s, unsigned ch, float deg) {
+    Command c{};
+    bool ok = parse(s, c);
+    ++g_checks;
+    if (!ok || c.type != CmdType::Servo || c.ch != ch || !near(c.deg, deg)) {
+        ++g_failures;
+        fprintf(stderr, "expected servo %u %g from %s (ok=%d ch=%u deg=%g)\n", ch, deg, s, ok,
+                static_cast<unsigned>(c.ch), c.deg);
+    }
+}
+
+static void expect_invalid(const char* s);
+
+static void test_servo() {
+    expect_servo(R"({"v":1,"seq":11,"cmd":"servo","ch":2,"deg":95.5})", 2, 95.5f);
+    expect_servo(R"({"v":1,"cmd":"servo","ch":0,"deg":0})", 0, 0.0f);
+    expect_servo(R"({"v":1,"cmd":"servo","ch":-0,"deg":90})", 0, 90.0f);
+    expect_servo(R"({"deg":1.8e2,"ch":5,"cmd":"servo","v":1})", 5, 180.0f);
+    expect_servo(R"({"v":1,"cmd":"servo","ch":3,"deg":500})", 3, 180.0f);  // clamped
+    expect_servo(R"({"v":1,"cmd":"servo","ch":3,"deg":-5})", 3, 0.0f);     // clamped
+    expect_invalid(R"({"v":1,"cmd":"servo","ch":true,"deg":90})");
+    expect_invalid(R"({"v":1,"cmd":"servo","ch":1.0,"deg":90})");
+    expect_invalid(R"({"v":1,"cmd":"servo","ch":1e0,"deg":90})");
+    expect_invalid(R"({"v":1,"cmd":"servo","ch":-1,"deg":90})");
+    expect_invalid(R"({"v":1,"cmd":"servo","ch":6,"deg":90})");
+    expect_invalid(R"({"v":1,"cmd":"servo","ch":10,"deg":90})");
+    expect_invalid(R"({"v":1,"cmd":"servo","ch":"2","deg":90})");
+    expect_invalid(R"({"v":1,"cmd":"servo","deg":90})");
+    expect_invalid(R"({"v":1,"cmd":"servo","ch":2})");
+    expect_invalid(R"({"v":1,"cmd":"servo","ch":2,"deg":NaN})");
+    expect_invalid(R"({"v":1,"cmd":"servo","ch":2,"deg":1e999})");
+    expect_invalid(R"({"v":1,"cmd":"servo","ch":2,"deg":null})");
+}
+
 static void expect_type(const char* s, CmdType t) {
     Command c{};
     bool ok = parse(s, c);
@@ -277,10 +311,23 @@ static void test_dispatch() {
     CHECK(fabsf(e.angle(EyeController::kTilt) - 95.0f) < 1e-3f);
     CHECK(fabsf(e.angle(EyeController::kFirstLid) - 90.0f) < 1e-3f);
     CHECK(!e.in_failsafe());
+
+    // servo: one lid to 100 and pan clamped to its max; nothing else moves.
+    CHECK(parse(R"({"v":1,"cmd":"servo","ch":3,"deg":100})", c));
+    dispatch(c, e, t);
+    CHECK(parse(R"({"v":1,"cmd":"servo","ch":0,"deg":180})", c));
+    dispatch(c, e, t);
+    settle(e, t);
+    CHECK(fabsf(e.angle(EyeController::kFirstLid + 1) - 100.0f) < 1e-3f);
+    CHECK(fabsf(e.angle(EyeController::kPan) - 120.0f) < 1e-3f);
+    CHECK(fabsf(e.angle(EyeController::kTilt) - 95.0f) < 1e-3f);
+    CHECK(fabsf(e.angle(EyeController::kFirstLid) - 90.0f) < 1e-3f);
+    CHECK(!e.in_failsafe());
 }
 
 int main() {
     test_valid();
+    test_servo();
     test_clamping();
     test_invalid();
     test_bytes();

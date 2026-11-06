@@ -17,12 +17,14 @@
 #define EYE_MAX_PAYLOAD 96
 static_assert(EYE_MAX_PAYLOAD == EYE_MAX_DATAGRAM - EYE_AUTH_TAG_LEN, "payload + tag must fill a datagram");
 
-enum class CmdType : uint8_t { Look, Blink, Center, Ping };
+enum class CmdType : uint8_t { Look, Blink, Center, Ping, Servo };
 
 struct Command {
     CmdType type;
     float x, y;         // Look only: clamped to [-1, 1]
     uint16_t blink_ms;  // Blink only: clamped to [50, 1000], rounded half to even, default 150
+    uint8_t ch;         // Servo only: servo index 0..5 (EyeController order)
+    float deg;          // Servo only: clamped to [0, 180]
     bool has_seq;       // seq was present
     uint64_t seq;       // [0, 2^53 - 1] if has_seq, else 0
 };

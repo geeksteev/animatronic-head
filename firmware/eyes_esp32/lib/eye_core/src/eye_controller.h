@@ -36,6 +36,10 @@ public:
     void center(uint32_t now_ms);
     // Heartbeat, no motion.
     void ping(uint32_t now_ms);
+    // Set one servo's target (0=pan, 1=tilt, 2..5=lids), clamped to its [min, max]. A lid
+    // cancels any blink; the other servos keep their current targets. An invalid idx or a
+    // non-finite deg is ignored entirely (does not reset the fail-safe timer).
+    void set_servo(int idx, float deg, uint32_t now_ms);
 
     // Apply fail-safe and blink timing, then rate-limit each servo toward its target.
     void update(uint32_t now_ms);

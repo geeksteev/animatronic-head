@@ -99,6 +99,33 @@ Pan and tilt to neutral, lids open.
 
 Heartbeat. No motion.
 
+### `servo`
+
+```json
+{"v":1,"seq":11,"cmd":"servo","ch":2,"deg":95.5}
+```
+
+Moves a single servo. Meant for bench calibration, which steps one servo at a time, including
+each lid on its own.
+
+- `ch` (integer, required): servo index `0` to `5`, in the head's order: `0` pan, `1` tilt,
+  `2` lid upper_left, `3` lid lower_left, `4` lid upper_right, `5` lid lower_right.
+  - The datagram is **invalid** if `ch` is not an integer (`2.0`, `2e0`, `"2"`, `true`) or is
+    out of range.
+- `deg` (number, required): absolute angle in degrees. Non-finite values are invalid.
+  - The codec clamps `deg` to `[0, 180]` and writes it in the usual 3-decimal format.
+  - The head then clamps it to that servo's `[min, max]` from the limits and rate-limits it
+    to `max_speed_dps`.
+
+Semantics:
+
+- Sets that servo's target only. Every other servo keeps its current target.
+- On a lid (`ch` 2 to 5), it cancels an active `blink`. The other lids hold their current
+  targets: if the blink closed them, they stay closed until another command moves them.
+- A later `look` overrides pan and tilt. `center` resets everything.
+- Like any valid command, it resets the fail-safe timer. When the fail-safe triggers, all
+  servos still go to neutral.
+
 ## Fail-safe
 
 - Every **valid** command, including `ping`, resets the head's fail-safe timer
@@ -111,13 +138,14 @@ Heartbeat. No motion.
   - the payload is larger than 96 bytes, not valid UTF-8, or not a JSON object;
   - `v` is missing or not the integer `1`;
   - `seq` is present but not an integer in `[0, 2^53 - 1]`;
-  - `cmd` is missing or not one of `look`, `blink`, `center`, `ping`;
+  - `cmd` is missing or not one of `look`, `blink`, `center`, `ping`, `servo`;
+  - `servo`'s `ch` is not an integer in `[0, 5]`;
   - a required field is missing, or any field is non-numeric (strings, booleans and `null`
     are not numbers);
   - any number is non-finite (`NaN`, `Infinity`, or a literal that overflows, e.g. `1e999`).
 
-Out-of-range numbers are **not** invalid: they are clamped (`x`/`y` to `[-1, 1]`, `ms` to
-`[50, 1000]`) and the command is accepted.
+Out-of-range numbers other than `ch` are **not** invalid: they are clamped (`x`/`y` to
+`[-1, 1]`, `ms` to `[50, 1000]`, `deg` to `[0, 180]`) and the command is accepted.
 
 ## Angle mapping
 
@@ -140,10 +168,15 @@ With the placeholder limits (`eye_pan`: min 60, neutral 90, max 120), `x = 0.25`
 - Numbers are written with at most **3 decimal places** and **no exponent notation**
   (`0.25`, `-1`, `0`, never `2.5e-1` or `1e-4`).
 - Trailing zeros are dropped and negative zero is written as `0`.
-- `ms` and `seq` are written as plain integers.
+- `ms`, `seq` and `ch` are written as plain integers.
 
 ## Size bound
 
-The longest possible payload is a `look` with the maximum `seq` and 3-decimal negative
-values, e.g. `{"v":1,"seq":9007199254740991,"cmd":"look","x":-0.999,"y":-0.999}` (65 bytes),
-under the 96-byte payload limit. With the tag it is 97 bytes, under the 128-byte datagram limit.
+The longest possible payloads are 65 bytes, under the 96-byte payload limit:
+
+- a `look` with the maximum `seq` and 3-decimal negative values, e.g.
+  `{"v":1,"seq":9007199254740991,"cmd":"look","x":-0.999,"y":-0.999}`;
+- a `servo` with the maximum `seq` and a 3-digit, 3-decimal angle, e.g.
+  `{"v":1,"seq":9007199254740991,"cmd":"servo","ch":5,"deg":179.999}`.
+
+With the tag they are 97 bytes, under the 128-byte datagram limit.

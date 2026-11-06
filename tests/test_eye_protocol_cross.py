@@ -22,6 +22,7 @@ from brain.eye_protocol import (
     Ping,
     ProtocolError,
     ReplayGuard,
+    Servo,
     decode,
     decode_signed,
     encode,
@@ -76,11 +77,16 @@ def _valid_vectors() -> list[bytes]:
     out = []
     for x, y in itertools.product(values, repeat=2):
         out.append(encode(Look(x, y)))
+    # Before the seq loop: in the auth stream, the 2**53 - 1 seq below closes the replay window.
+    for ch in range(P.SERVO_COUNT):
+        for deg in (0, 90, 95.5, 179.999, 180, -5, 500, 0.0004, 12.3456):
+            out.append(encode(Servo(ch, deg)))
     for seq in (None, 0, 1, 7, 2**31 - 1, 2**31, 2**53 - 1):
         out.append(encode(Look(0.25, -0.5), seq))
         out.append(encode(Blink(), seq))
         out.append(encode(Center(), seq))
         out.append(encode(Ping(), seq))
+        out.append(encode(Servo(2, 95.5), seq))
     for ms in (0, 1, 49, 50, 51, 149.5, 150, 150.5, 151.5, 400, 999, 999.5, 1000, 1001, 10**9, -5):
         out.append(encode(Blink(ms)))
     return out
@@ -161,6 +167,28 @@ def _handwritten_vectors() -> list[bytes]:
         '{"v":1,"cmd":"blink","ms":"150"}', '{"v":1,"cmd":"blink","ms":null}',
         '{"v":1,"cmd":"blink","ms":false}', '{"v":1,"cmd":"blink","ms":1e999}',
         '{"v":1,"cmd":"blink","ms":[150]}',
+        # servo: valid spellings the encoder does not use
+        '{"deg":90,"ch":3,"cmd":"servo","v":1}', '{"v":1,"cmd":"servo","ch":-0,"deg":-0}',
+        '{"v":1,"cmd":"servo","ch":1,"deg":9.5e1}', '{"v":1,"cmd":"servo","ch":4,"deg":-1e300}',
+        '{"v":1,"cmd":"servo","ch":4,"deg":1e-999}',
+        '{"v":1,"cmd":"servo","ch":"x","ch":2,"deg":90}',
+        '{"v":1,"cmd":"servo","ch":2,"deg":90,"ch":7}',
+        '{"v":1,"cmd":"servo","ch":0,"deg":' + "9" * 60 + "}",
+        # servo: malformed
+        '{"v":1,"cmd":"servo","ch":true,"deg":90}', '{"v":1,"cmd":"servo","ch":false,"deg":90}',
+        '{"v":1,"cmd":"servo","ch":1.0,"deg":90}', '{"v":1,"cmd":"servo","ch":1e0,"deg":90}',
+        '{"v":1,"cmd":"servo","ch":0.5,"deg":90}', '{"v":1,"cmd":"servo","ch":-1,"deg":90}',
+        '{"v":1,"cmd":"servo","ch":6,"deg":90}', '{"v":1,"cmd":"servo","ch":10,"deg":90}',
+        '{"v":1,"cmd":"servo","ch":255,"deg":90}', '{"v":1,"cmd":"servo","ch":-6,"deg":90}',
+        '{"v":1,"cmd":"servo","ch":99999999999999999999,"deg":90}',
+        '{"v":1,"cmd":"servo","ch":01,"deg":90}', '{"v":1,"cmd":"servo","ch":"2","deg":90}',
+        '{"v":1,"cmd":"servo","ch":null,"deg":90}', '{"v":1,"cmd":"servo","ch":[2],"deg":90}',
+        '{"v":1,"cmd":"servo","deg":90}', '{"v":1,"cmd":"servo","ch":2}', '{"v":1,"cmd":"servo"}',
+        '{"v":1,"cmd":"servo","ch":2,"deg":NaN}', '{"v":1,"cmd":"servo","ch":2,"deg":Infinity}',
+        '{"v":1,"cmd":"servo","ch":2,"deg":-Infinity}', '{"v":1,"cmd":"servo","ch":2,"deg":1e999}',
+        '{"v":1,"cmd":"servo","ch":2,"deg":"90"}', '{"v":1,"cmd":"servo","ch":2,"deg":true}',
+        '{"v":1,"cmd":"servo","ch":2,"deg":null}', '{"v":1,"cmd":"servo","ch":2,"deg":{}}',
+        '{"v":1,"cmd":"Servo","ch":2,"deg":90}', '{"v":1,"cmd":"servos","ch":2,"deg":90}',
     ]
     out = [t.encode("utf-8", "surrogatepass") for t in s]
     out += [
@@ -184,7 +212,7 @@ def _handwritten_vectors() -> list[bytes]:
 def _vectors() -> list[bytes]:
     vectors = _valid_vectors() + _handwritten_vectors()
     # Every prefix of a few valid datagrams is malformed (or, rarely, still valid).
-    for d in (encode(Look(0.25, -0.5), 7), encode(Blink(400), 3)):
+    for d in (encode(Look(0.25, -0.5), 7), encode(Blink(400), 3), encode(Servo(5, 179.999), 9)):
         vectors += [d[:i] for i in range(len(d))]
     return vectors
 
@@ -200,6 +228,8 @@ def _expected(data: bytes) -> tuple:
         return ("blink", cmd.ms)
     if isinstance(cmd, Center):
         return ("center",)
+    if isinstance(cmd, Servo):
+        return ("servo", cmd.ch, cmd.deg)
     assert isinstance(cmd, Ping)
     return ("ping",)
 
@@ -216,6 +246,9 @@ def _matches(line: str, expected: tuple) -> bool:
                 and math.isclose(y, expected[2], abs_tol=TOL))
     if expected[0] == "blink":
         return len(parts) == 2 and int(parts[1]) == expected[1]
+    if expected[0] == "servo":
+        return (len(parts) == 3 and int(parts[1]) == expected[1]
+                and math.isclose(float(parts[2]), expected[2], abs_tol=TOL))
     return len(parts) == 1
 
 
@@ -236,7 +269,7 @@ def parser_bin(tmp_path_factory) -> Path:
 
 def test_vectors_cover_both_outcomes():
     results = [_expected(d)[0] for d in _vectors()]
-    for kind in ("look", "blink", "center", "ping", "invalid"):
+    for kind in ("look", "blink", "center", "ping", "servo", "invalid"):
         assert results.count(kind) >= 5, kind
 
 
@@ -314,7 +347,7 @@ def test_auth_vectors_cover_both_outcomes():
     accepted = [r for r in results if r[0] != "invalid"]
     assert len(accepted) >= 50
     assert len(results) - len(accepted) >= 200
-    for kind in ("look", "blink", "center", "ping"):
+    for kind in ("look", "blink", "center", "ping", "servo"):
         assert any(r[1] == kind for r in accepted), kind
 
 
