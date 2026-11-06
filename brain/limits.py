@@ -120,7 +120,12 @@ def load_limits(path: str | Path | None = None) -> Limits:
     failsafe = data.get("failsafe")
     if isinstance(failsafe, Mapping):
         if "command_timeout_ms" in failsafe:
-            timeout = int(failsafe["command_timeout_ms"])
+            raw_timeout = failsafe["command_timeout_ms"]
+            # Only a real YAML int: int() would turn true into 1 and 500.9 into 500,
+            # and None would raise TypeError instead of LimitsError.
+            if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, int):
+                raise LimitsError(f"{path}: failsafe.command_timeout_ms must be an integer")
+            timeout = raw_timeout
         if "neutral_on_boot" in failsafe:
             raw_nob = failsafe["neutral_on_boot"]
             # Only a real YAML boolean: bool("false") would silently be True.
