@@ -95,3 +95,25 @@ ok, score = matches_reference(image, neutral_image, nf.threshold)
 - Each score is stamped with the later frame's `t`. Motion before `command_t` is ignored.
 - `settled_t` is the first frame of a still run lasting `settle_window_s` (0.2 s). If that run
   starts after `command_t + timeout_s` (2 s), `settled` is False.
+
+## Firmware flasher and serial log
+
+`bench/flash.py` uploads `firmware/eyes_esp32` with `pio run -d <dir> -t upload`
+(`--upload-port <port>` when given). It refuses to run unless `include/secrets.h` exists (copy
+`include/secrets.h.example`); it never reads that file. Failures and timeouts (180 s) raise
+`FlashError` carrying the last 50 output lines.
+
+`bench/serial_log.py` reads the ESP32 log on a background thread (needs pyserial,
+`pip install -e '.[bench]'`; `import bench.serial_log` does not).
+
+```python
+from bench.flash import flash
+from bench.serial_log import SerialLog
+
+flash(port="/dev/ttyUSB0")                      # close any SerialLog on this port first
+with SerialLog("/dev/ttyUSB0") as log:          # then open a new one
+    log.wait_for(r"\[wifi\] connected", timeout_s=20)
+    print(log.ip_address(), log.failsafe_events())
+```
+
+**The USB port is shared:** close `SerialLog` before `flash()` and reopen it afterwards.
