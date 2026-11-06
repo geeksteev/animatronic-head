@@ -1,31 +1,42 @@
 """Encode and decode eye commands for the head (see ``docs/eye-protocol.md``).
 
-One command per UDP datagram, as a compact UTF-8 JSON object of at most
-``MAX_DATAGRAM`` bytes. This module only builds and parses datagrams; it does
+One command per UDP datagram: a compact UTF-8 JSON payload of at most
+``MAX_PAYLOAD`` bytes, followed by a ``TAG_LEN``-character authentication tag
+(``sign`` / ``verify``). This module only builds and parses datagrams; it does
 not open sockets and does not map commands to servo angles (the head does that
 using ``config/limits.yaml``).
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Union
 
 PROTOCOL_VERSION = 1
 DEFAULT_PORT = 4210
-MAX_DATAGRAM = 128
+MAX_DATAGRAM = 128  # whole UDP datagram: payload + tag
+KEY_LEN = 32  # bytes; written as 64 hex characters in config
+TAG_LEN = 32  # lowercase hex characters: HMAC-SHA256 truncated to 128 bits
+MAX_PAYLOAD = MAX_DATAGRAM - TAG_LEN
 BLINK_MIN_MS = 50
 BLINK_MAX_MS = 1000
 BLINK_DEFAULT_MS = 150
 
 SEQ_MIN = 0
-SEQ_MAX = 2**31 - 1  # fits a signed 32-bit int on the head
+SEQ_MAX = 2**53 - 1  # exact in a double; the head stores it as uint64
 
 
 class ProtocolError(ValueError):
     """A command cannot be encoded, or a datagram is not a valid command."""
+
+
+class AuthError(ProtocolError):
+    """A datagram has a missing or wrong authentication tag, or no ``seq``."""
 
 
 @dataclass(frozen=True)
@@ -115,8 +126,8 @@ def encode(cmd: Command, seq: int | None = None) -> bytes:
         raise ProtocolError(f"unknown command type {type(cmd).__name__}")
 
     data = ("{" + ",".join(parts) + "}").encode("utf-8")
-    if len(data) > MAX_DATAGRAM:  # cannot happen with the bounds above; guard anyway
-        raise ProtocolError(f"encoded datagram is {len(data)} bytes (max {MAX_DATAGRAM})")
+    if len(data) > MAX_PAYLOAD:  # cannot happen with the bounds above; guard anyway
+        raise ProtocolError(f"encoded payload is {len(data)} bytes (max {MAX_PAYLOAD})")
     return data
 
 
@@ -125,14 +136,18 @@ def _reject_constant(name: str) -> float:
 
 
 def decode(data: bytes) -> Command:
-    """Parse a datagram into a command, applying the same clamping as ``encode``.
+    """Parse a payload (no tag) into a command, applying the same clamping as ``encode``.
 
     Raises ProtocolError for oversize input, invalid UTF-8 or JSON, a wrong or
     missing ``v``, an invalid ``seq``, an unknown ``cmd``, missing or
     non-numeric fields, or non-finite values. Unknown extra keys are ignored.
     """
-    if len(data) > MAX_DATAGRAM:
-        raise ProtocolError(f"datagram is {len(data)} bytes (max {MAX_DATAGRAM})")
+    return _decode(data)[1]
+
+
+def _decode(data: bytes) -> tuple[int | None, Command]:
+    if len(data) > MAX_PAYLOAD:
+        raise ProtocolError(f"payload is {len(data)} bytes (max {MAX_PAYLOAD})")
     try:
         obj = json.loads(data.decode("utf-8"), parse_constant=_reject_constant)
     except ProtocolError:
@@ -145,19 +160,100 @@ def decode(data: bytes) -> Command:
     v = obj.get("v")
     if isinstance(v, bool) or not isinstance(v, int) or v != PROTOCOL_VERSION:
         raise ProtocolError(f"unsupported protocol version {v!r}")
-    if "seq" in obj:
-        _seq(obj["seq"])
+    seq = _seq(obj["seq"]) if "seq" in obj else None
 
     name = obj.get("cmd")
     if name == "look":
         for field in ("x", "y"):
             if field not in obj:
                 raise ProtocolError(f"look: missing {field}")
-        return Look(_unit(obj["x"], "x"), _unit(obj["y"], "y"))
+        return seq, Look(_unit(obj["x"], "x"), _unit(obj["y"], "y"))
     if name == "blink":
-        return Blink(_blink_ms(obj.get("ms", BLINK_DEFAULT_MS)))
+        return seq, Blink(_blink_ms(obj.get("ms", BLINK_DEFAULT_MS)))
     if name == "center":
-        return Center()
+        return seq, Center()
     if name == "ping":
-        return Ping()
+        return seq, Ping()
     raise ProtocolError(f"unknown cmd {name!r}")
+
+
+# -- authentication -----------------------------------------------------------
+
+_KEY_HEX = re.compile(r"[0-9a-fA-F]{%d}" % (2 * KEY_LEN))
+
+
+def parse_key(text: str) -> bytes:
+    """Parse a shared key written as exactly 64 hex characters. Rejects an all-zero key."""
+    if not isinstance(text, str) or not _KEY_HEX.fullmatch(text.strip()):
+        raise ValueError(f"eye key must be exactly {2 * KEY_LEN} hex characters")
+    key = bytes.fromhex(text.strip())
+    if not any(key):
+        raise ValueError("eye key must not be all zeros")
+    return key
+
+
+def check_key(key: bytes) -> None:
+    """Raise ValueError unless ``key`` is ``KEY_LEN`` bytes."""
+    if not isinstance(key, (bytes, bytearray)) or len(key) != KEY_LEN:
+        raise ValueError(f"eye key must be {KEY_LEN} bytes")
+
+
+def tag(payload: bytes, key: bytes) -> bytes:
+    """The ``TAG_LEN`` lowercase hex characters authenticating ``payload``."""
+    check_key(key)
+    return hmac.new(bytes(key), payload, hashlib.sha256).hexdigest()[:TAG_LEN].encode("ascii")
+
+
+def sign(payload: bytes, key: bytes) -> bytes:
+    """Append the authentication tag to ``payload``."""
+    if len(payload) > MAX_PAYLOAD:
+        raise ProtocolError(f"payload is {len(payload)} bytes (max {MAX_PAYLOAD})")
+    return payload + tag(payload, key)
+
+
+def verify(datagram: bytes, key: bytes) -> bytes:
+    """Check the tag on ``datagram`` and return the payload. Raises AuthError."""
+    check_key(key)
+    if len(datagram) > MAX_DATAGRAM:
+        raise AuthError(f"datagram is {len(datagram)} bytes (max {MAX_DATAGRAM})")
+    if len(datagram) < TAG_LEN:
+        raise AuthError("datagram too short for a tag")
+    payload, got = datagram[:-TAG_LEN], datagram[-TAG_LEN:]
+    if not hmac.compare_digest(tag(payload, key), got):
+        raise AuthError("bad authentication tag")
+    return payload
+
+
+def encode_signed(cmd: Command, seq: int, key: bytes) -> bytes:
+    """Encode ``cmd`` with ``seq`` (required) and append the tag. What the head accepts."""
+    if seq is None:
+        raise ProtocolError("seq is required on authenticated datagrams")
+    return sign(encode(cmd, seq), key)
+
+
+def decode_signed(datagram: bytes, key: bytes) -> tuple[int, Command]:
+    """Verify and decode a datagram. Returns ``(seq, cmd)``.
+
+    Raises AuthError for a bad tag or a missing ``seq``, ProtocolError for an
+    invalid payload. Does not check for replays: see ``ReplayGuard``.
+    """
+    seq, cmd = _decode(verify(datagram, key))
+    if seq is None:
+        raise AuthError("seq is required on authenticated datagrams")
+    return seq, cmd
+
+
+class ReplayGuard:
+    """The head's replay rule: accept a seq only if it is above every seq accepted so far.
+
+    Reference implementation of ``ReplayGuard`` in the firmware's eye_core.
+    """
+
+    def __init__(self) -> None:
+        self.last: int | None = None
+
+    def accept(self, seq: int) -> bool:
+        if self.last is not None and seq <= self.last:
+            return False
+        self.last = seq
+        return True

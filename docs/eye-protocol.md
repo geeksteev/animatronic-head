@@ -6,21 +6,61 @@ The wire format the brain uses to send eye commands to the head. The brain-side 
 ## Transport
 
 - **UDP**, one command per datagram. Default port **4210**.
-- Each datagram is a single **UTF-8 JSON object** of at most **128 bytes**. Larger datagrams
-  are rejected without being parsed.
+- Each datagram is at most **128 bytes**: a **payload** (one UTF-8 JSON object, at most
+  **96 bytes**) immediately followed by a 32-character **tag** (see
+  [Authentication](#authentication)). Larger datagrams are rejected without being parsed.
 - Senders write compact JSON (no whitespace) with keys in a fixed order: `v`, `seq`, `cmd`,
   then the command's fields. Receivers must not depend on key order or whitespace, and ignore
   keys they do not know.
+
+The JSON examples below show the payload only.
 
 ## Common fields
 
 | Key   | Type    | Required | Meaning |
 |-------|---------|----------|---------|
 | `v`   | integer | yes      | Protocol version. Must be exactly `1`. |
-| `seq` | integer | no       | Sequence number, `0` to `2^31 - 1`. For logging only. |
+| `seq` | integer | yes\*    | Sequence number, `0` to `2^53 - 1`. Used for replay protection. |
 | `cmd` | string  | yes      | Command name, see below. Case-sensitive. |
 
-The head does **not** reorder or drop datagrams by `seq`. Commands apply in arrival order.
+\* The payload grammar allows `seq` to be absent, but the head drops any datagram without it
+(see [Authentication](#authentication)).
+
+The head does **not** reorder datagrams. It drops any datagram whose `seq` is not above the last
+accepted one, so commands apply in send order and late ones are discarded.
+
+## Authentication
+
+Every datagram carries a shared-key authenticator, so only a sender holding the key can move the
+eyes or feed the fail-safe.
+
+```
+datagram = payload || tag
+tag      = lowercase hex of the first 16 bytes of HMAC-SHA256(key, payload)   (32 characters)
+```
+
+- **Key:** 32 bytes, written as 64 hex characters. The head gets it from `EYE_AUTH_KEY_HEX` in
+  the gitignored `firmware/eyes_esp32/include/secrets.h`. The brain gets it from the `EYES_KEY`
+  environment variable or `eye_key` in the gitignored `config/secrets.yaml`. Both have a
+  committed `.example`. Generate a key with
+  `python -c "import secrets; print(secrets.token_hex(32))"`. An all-zero key is refused.
+- The tag covers the payload bytes exactly as sent. There is no separator: the tag is the last
+  32 bytes of the datagram. Upper-case hex is rejected.
+- **Replay window:** the head remembers the highest `seq` it has accepted and accepts a datagram
+  only if its `seq` is strictly higher. Duplicates, replays and late datagrams are dropped.
+- **Seq source:** the brain starts `seq` at the current Unix time in microseconds and adds 1 per
+  datagram. A restarted brain therefore starts above everything it sent before, without
+  persisting any state. `seq` never wraps.
+- **Check order on the head:** size, tag (constant-time compare), payload, `seq` present, replay
+  window. The replay window only advances when every check passes.
+
+Limitations:
+
+- The head forgets the window when it reboots. Until the brain's next datagram, a recorded
+  datagram from an earlier session can be replayed once per `seq`.
+- If the brain's clock steps backwards past the last `seq` the head accepted, the head drops its
+  datagrams until the clock catches up or the head reboots.
+- The payload is authenticated, not encrypted.
 
 ## Commands
 
@@ -64,11 +104,13 @@ Heartbeat. No motion.
 - Every **valid** command, including `ping`, resets the head's fail-safe timer
   (`failsafe.command_timeout_ms` in `config/limits.yaml`).
 - If the timer expires, all servos go to neutral.
-- Malformed or unknown datagrams are ignored and do **not** reset the timer. A datagram is
-  invalid if any of these hold:
-  - it is larger than 128 bytes, not valid UTF-8, or not a JSON object;
+- Unauthenticated, replayed, malformed or unknown datagrams are ignored and do **not** reset
+  the timer. A datagram is invalid if any of these hold:
+  - it is larger than 128 bytes, or its tag is missing or wrong;
+  - `seq` is missing, or not above the last accepted `seq`;
+  - the payload is larger than 96 bytes, not valid UTF-8, or not a JSON object;
   - `v` is missing or not the integer `1`;
-  - `seq` is present but not an integer in `[0, 2^31 - 1]`;
+  - `seq` is present but not an integer in `[0, 2^53 - 1]`;
   - `cmd` is missing or not one of `look`, `blink`, `center`, `ping`;
   - a required field is missing, or any field is non-numeric (strings, booleans and `null`
     are not numbers);
@@ -102,6 +144,6 @@ With the placeholder limits (`eye_pan`: min 60, neutral 90, max 120), `x = 0.25`
 
 ## Size bound
 
-The longest possible datagram is a `look` with the maximum `seq` and 3-decimal negative
-values, e.g. `{"v":1,"seq":2147483647,"cmd":"look","x":-0.999,"y":-0.999}` (59 bytes),
-well under the 128-byte limit.
+The longest possible payload is a `look` with the maximum `seq` and 3-decimal negative
+values, e.g. `{"v":1,"seq":9007199254740991,"cmd":"look","x":-0.999,"y":-0.999}` (65 bytes),
+under the 96-byte payload limit. With the tag it is 97 bytes, under the 128-byte datagram limit.

@@ -80,3 +80,32 @@ def test_pins_header_has_pulse_range_and_lid_direction() -> None:
     assert re.search(r"#define\s+SERVO_MAX_US\s+2500\b", pins)
     assert "LID_CLOSED_AT_MAX[4]" in pins
     assert "calibrate on bench" in pins.lower()
+
+
+def test_secrets_example_has_auth_key_placeholder() -> None:
+    text = (FW / "include" / "secrets.h.example").read_text()
+    m = re.search(r'#define\s+EYE_AUTH_KEY_HEX\s+"([^"]*)"', text)
+    assert m, "secrets.h.example must define EYE_AUTH_KEY_HEX"
+    # Not a usable key: copying the example unchanged must fail the build's length check.
+    assert len(m.group(1)) != 64
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_brain_secrets_not_tracked() -> None:
+    rel = "config/secrets.yaml"
+    assert (ROOT / "config" / "secrets.yaml.example").is_file()
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", rel], cwd=ROOT, capture_output=True, text=True
+    )
+    assert tracked.returncode != 0, f"{rel} is tracked by git"
+    ignored = subprocess.run(["git", "check-ignore", "-q", rel], cwd=ROOT)
+    assert ignored.returncode == 0, f"{rel} is not gitignored"
+
+
+def test_main_authenticates_before_dispatch() -> None:
+    src = _strip_comments(MAIN.read_text())
+    assert re.search(r'#include\s+"eye_auth\.h"', src)
+    assert "EYE_AUTH_KEY_HEX" in src and "parse_auth_key" in src
+    assert "open_command(" in src
+    # Datagrams must not reach the controller through the unauthenticated parser.
+    assert "parse_command(" not in src

@@ -9,7 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 LIB_SRC = ROOT / "firmware" / "eyes_esp32" / "lib" / "eye_core" / "src"
 NATIVE_DIR = ROOT / "tests" / "native"
-TEST_SRCS = ["test_eye_controller.cpp", "test_eye_protocol.cpp"]
+TEST_SRCS = ["test_eye_controller.cpp", "test_eye_protocol.cpp", "test_eye_auth.cpp"]
 
 CXXFLAGS = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-O1"]
 

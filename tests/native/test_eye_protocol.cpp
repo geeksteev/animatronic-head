@@ -88,7 +88,19 @@ static void test_valid() {
     // seq bounds; -0 is the integer 0.
     expect_type(R"({"v":1,"seq":0,"cmd":"ping"})", CmdType::Ping);
     expect_type(R"({"v":1,"seq":-0,"cmd":"ping"})", CmdType::Ping);
-    expect_type(R"({"v":1,"seq":2147483647,"cmd":"ping"})", CmdType::Ping);
+    expect_type(R"({"v":1,"seq":2147483648,"cmd":"ping"})", CmdType::Ping);
+    expect_type(R"({"v":1,"seq":9007199254740991,"cmd":"ping"})", CmdType::Ping);
+    {
+        Command c{};
+        CHECK(parse(R"({"v":1,"seq":9007199254740991,"cmd":"ping"})", c));
+        CHECK(c.has_seq && c.seq == 9007199254740991ull);
+        CHECK(parse(R"({"v":1,"seq":-0,"cmd":"ping"})", c));
+        CHECK(c.has_seq && c.seq == 0);
+        CHECK(parse(R"({"v":1,"seq":5,"seq":12,"cmd":"ping"})", c));
+        CHECK(c.has_seq && c.seq == 12);
+        CHECK(parse(R"({"v":1,"cmd":"ping"})", c));
+        CHECK(!c.has_seq);
+    }
     // Underflow is fine (becomes 0).
     expect_look(R"({"v":1,"cmd":"look","x":1e-999,"y":-1e-400})", 0.0f, 0.0f);
 }
@@ -139,7 +151,8 @@ static void test_invalid() {
     expect_invalid(R"({"v":01,"cmd":"ping"})");
     // seq.
     expect_invalid(R"({"v":1,"seq":-1,"cmd":"ping"})");
-    expect_invalid(R"({"v":1,"seq":2147483648,"cmd":"ping"})");
+    expect_invalid(R"({"v":1,"seq":9007199254740992,"cmd":"ping"})");
+    expect_invalid(R"({"v":1,"seq":18446744073709551616,"cmd":"ping"})");
     expect_invalid(R"({"v":1,"seq":99999999999999999999,"cmd":"ping"})");
     expect_invalid(R"({"v":1,"seq":1.5,"cmd":"ping"})");
     expect_invalid(R"({"v":1,"seq":"7","cmd":"ping"})");
@@ -189,30 +202,30 @@ static void test_bytes() {
     const char* s = R"({"v":1,"cmd":"ping"}garbage)";
     CHECK(parse_command(s, 20, c) && c.type == CmdType::Ping);
 
-    // Size limit: exactly 128 bytes is fine, 129 is rejected.
-    char buf[EYE_MAX_DATAGRAM + 2];
+    // Size limit: exactly EYE_MAX_PAYLOAD bytes is fine, one more is rejected.
+    char buf[EYE_MAX_PAYLOAD + 2];
     const char* head = "{\"v\":1,\"cmd\":\"ping\",\"pad\":\"";
     size_t hl = strlen(head);
     memset(buf, 'a', sizeof(buf));
     memcpy(buf, head, hl);
-    buf[EYE_MAX_DATAGRAM - 2] = '"';
-    buf[EYE_MAX_DATAGRAM - 1] = '}';
-    CHECK(parse_command(buf, EYE_MAX_DATAGRAM, c) && c.type == CmdType::Ping);
-    buf[EYE_MAX_DATAGRAM - 1] = ' ';
-    buf[EYE_MAX_DATAGRAM] = '}';
-    CHECK(!parse_command(buf, EYE_MAX_DATAGRAM + 1, c));
+    buf[EYE_MAX_PAYLOAD - 2] = '"';
+    buf[EYE_MAX_PAYLOAD - 1] = '}';
+    CHECK(parse_command(buf, EYE_MAX_PAYLOAD, c) && c.type == CmdType::Ping);
+    buf[EYE_MAX_PAYLOAD - 1] = ' ';
+    buf[EYE_MAX_PAYLOAD] = '}';
+    CHECK(!parse_command(buf, EYE_MAX_PAYLOAD + 1, c));
 
     // Deep nesting inside an unknown key is valid JSON and must not crash.
-    char deep[EYE_MAX_DATAGRAM + 1];
+    char deep[EYE_MAX_PAYLOAD + 1];
     size_t n = 0;
     const char* pre = "{\"v\":1,\"cmd\":\"ping\",\"d\":";
     memcpy(deep, pre, strlen(pre));
     n = strlen(pre);
-    size_t depth = (EYE_MAX_DATAGRAM - n - 1) / 2;
+    size_t depth = (EYE_MAX_PAYLOAD - n - 1) / 2;
     for (size_t i = 0; i < depth; ++i) deep[n++] = '[';
     for (size_t i = 0; i < depth; ++i) deep[n++] = ']';
     deep[n++] = '}';
-    CHECK(n <= EYE_MAX_DATAGRAM);
+    CHECK(n <= EYE_MAX_PAYLOAD);
     CHECK(parse_command(deep, n, c) && c.type == CmdType::Ping);
 }
 

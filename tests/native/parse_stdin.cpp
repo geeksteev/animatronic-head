@@ -1,9 +1,17 @@
-// Cross-check harness for eye_protocol. Built and driven by tests/test_eye_protocol_cross.py.
-// Reads one hex-encoded datagram per line (hex so any bytes, including newlines, can be sent)
-// and prints one result line per input: "look X Y", "blink MS", "center", "ping" or "invalid".
+// Cross-check harness for eye_protocol and eye_auth. Built and driven by
+// tests/test_eye_protocol_cross.py.
+//
+//   parse_stdin            each line is a payload: parse_command
+//   parse_stdin KEY_HEX    each line is a datagram: open_command with one ReplayGuard for
+//                          the whole run, as on the head
+//
+// Reads one hex-encoded input per line (hex so any bytes, including newlines, can be sent)
+// and prints one result line per input: "look X Y", "blink MS", "center", "ping" or
+// "invalid". In KEY_HEX mode accepted lines are prefixed with "SEQ ".
 #include <stdio.h>
 #include <string.h>
 
+#include "eye_auth.h"
 #include "eye_protocol.h"
 
 static int hex_val(int c) {
@@ -13,7 +21,14 @@ static int hex_val(int c) {
     return -1;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    AuthKey key{};
+    ReplayGuard guard;
+    const bool auth = argc > 1;
+    if (auth && !parse_auth_key(argv[1], key)) {
+        fprintf(stderr, "bad key\n");
+        return 2;
+    }
     // Up to 4 * EYE_MAX_DATAGRAM bytes so oversize inputs can be tested too.
     static char line[16 * EYE_MAX_DATAGRAM];
     static char data[8 * EYE_MAX_DATAGRAM];
@@ -29,9 +44,10 @@ int main() {
         Command c{};
         if (!ok) {
             printf("error\n");
-        } else if (!parse_command(data, len, c)) {
+        } else if (auth ? !open_command(key, guard, data, len, c) : !parse_command(data, len, c)) {
             printf("invalid\n");
         } else {
+            if (auth) printf("%llu ", static_cast<unsigned long long>(c.seq));
             switch (c.type) {
                 case CmdType::Look: printf("look %.3f %.3f\n", c.x, c.y); break;
                 case CmdType::Blink: printf("blink %u\n", static_cast<unsigned>(c.blink_ms)); break;
