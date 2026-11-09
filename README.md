@@ -30,6 +30,7 @@ brain (Python, LAN server) ──UDP, JSON──▶ head (ESP32) ──PWM──
 |------|------------|
 | `firmware/eyes_esp32/` | PlatformIO project for the eye ESP32. See its [README](firmware/eyes_esp32/README.md). |
 | `firmware/eyes_esp32/lib/eye_core/` | Hardware-independent C++ motion logic and protocol parser, tested on the host. |
+| `bench/` | Bench tooling: motion test, camera, current meter, flasher. See its [README](bench/README.md). |
 | `brain/` | Python package for the off-board brain: limits loader, protocol codec, eye client. |
 | `config/limits.yaml` | Servo safety limits. **Human-owned**: agents and PRs must not change it. |
 | `docs/` | [Eye protocol](docs/eye-protocol.md) and [eye client](docs/eye-client.md) docs. |

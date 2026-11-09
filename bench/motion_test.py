@@ -363,3 +363,11 @@ def run_motion_test(
         write_report(run.out_dir, report, run.images)
     client.close()
     return report
+
+
+if __name__ == "__main__":  # python -m bench.motion_test (see bench/cli.py)
+    import sys
+
+    from bench.cli import main
+
+    sys.exit(main())
