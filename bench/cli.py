@@ -54,7 +54,6 @@ def _positive_finite(text: str) -> float:
 
 
 def _parser() -> argparse.ArgumentParser:
-    d = CameraSettings()
     p = argparse.ArgumentParser(
         prog="python -m bench.motion_test",
         description="Run the bench motion test against the eye head.",
@@ -70,6 +69,13 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-flash", action="store_true", help="do not flash the firmware first")
     p.add_argument("--limits", default=DEFAULT_LIMITS, help="limits file (read-only; default: %(default)s)")
     p.add_argument("--out", help=f"output directory (default: {DEFAULT_OUT_ROOT}/<UTC timestamp>/)")
+    add_camera_args(p)
+    return p
+
+
+def add_camera_args(p: argparse.ArgumentParser) -> None:
+    """Add the camera flag group (shared with ``bench.calibrate``)."""
+    d = CameraSettings()
     c = p.add_argument_group("camera")
     c.add_argument("--camera", default=d.device, help="video device (default: %(default)s)")
     c.add_argument("--width", type=int, default=d.width)
@@ -81,7 +87,14 @@ def _parser() -> argparse.ArgumentParser:
     c.add_argument("--focus", type=int, default=d.focus)
     c.add_argument("--wb-temperature", type=int, default=d.wb_temperature)
     c.add_argument("--warmup-frames", type=int, default=d.warmup_frames)
-    return p
+
+
+def camera_settings(args: argparse.Namespace) -> CameraSettings:
+    return CameraSettings(
+        device=args.camera, width=args.width, height=args.height, fps=args.fps,
+        fourcc=args.fourcc, exposure=args.exposure, gain=args.gain, focus=args.focus,
+        wb_temperature=args.wb_temperature, warmup_frames=args.warmup_frames,
+    )
 
 
 def _err(msg: str) -> None:
@@ -94,11 +107,7 @@ def main(argv: Optional[Sequence[str]] = None,
     args = parser.parse_args(argv)
     f = dict(factories or {})
 
-    settings = CameraSettings(
-        device=args.camera, width=args.width, height=args.height, fps=args.fps,
-        fourcc=args.fourcc, exposure=args.exposure, gain=args.gain, focus=args.focus,
-        wb_temperature=args.wb_temperature, warmup_frames=args.warmup_frames,
-    )
+    settings = camera_settings(args)
     clock = f.get("clock", time.time)
     if args.out:
         out_dir = Path(args.out)

@@ -65,6 +65,44 @@ Top level: `schema_version`, `started_at`, `camera_settings`, `command_timeout_m
 4. The `failsafe` step may also have `evidence.serial_failsafe_enter`: whether the serial log
    showed `[failsafe] ENTER`.
 
+## Servo calibration (CLI)
+
+Finds one servo's mechanical stops and writes a **proposal** for a human to review. It never
+writes `config/limits.yaml`. Same rig as the motion test; the current meter is mandatory
+(there is no `--no-meter`) and nothing is flashed.
+
+```sh
+python -m bench.calibrate eye_pan --hard-min 40 --hard-max 140 --stall-amps 0.8 \
+    --meter-port /dev/ttyUSB1 --host 192.0.2.10 --out bench/out/eye_pan.yaml
+```
+
+- `SERVO` is a name from `config/limits.yaml` (unknown names fail). `--hard-min/--hard-max`
+  (degrees) and `--stall-amps` and `--out` are required. Optional: `--spike-amps` (also stop above
+  baseline + A), `--step 1.0`, `--dwell 0.3`, `--backoff 5`, `--still-steps 2`.
+- `--host` (default `$EYES_HOST`, else the IP on the serial log of `--port`), `--camera` and the other
+  camera flags, `--limits`: as for the motion test.
+- **The head also clamps to `config/limits.yaml`, so calibration cannot search past the current
+  limits.** The effective bound is `[hard-min, hard-max]` intersected with the servo's `[min, max]`,
+  and it is printed at start. Exit 2 if it is empty or does not contain `neutral`. To search wider,
+  a human must first widen `config/limits.yaml`, regenerate the header and reflash. Without the
+  limits in the bound, the head's clamp would look like a mechanical stop.
+- Algorithm: neutral, measure the noise floor and baseline current, then step toward max and toward
+  min (each step at most `step` degrees and `max_speed_dps * dwell`), waiting `dwell` after each.
+  Stop on a current sample over `--stall-amps` or baseline + `--spike-amps`, or when the image did
+  not change for `--still-steps` steps (stop angle = last angle that still changed), or at the
+  bound (`stop_found: false`, proposal = the bound). On a stop the servo is immediately sent
+  `--backoff` degrees back toward neutral; that angle is the proposal. It returns to neutral after
+  each direction. On an error or Ctrl-C it sends neutral and closes the client.
+- Output: `--out` (YAML starting `# PROPOSAL ONLY - a human must review it before editing
+  config/limits.yaml`) with `servo`, `channel`, `proposed_min`, `proposed_max`, `neutral`, per
+  direction (`max`, `min`) `stop_found`, `reason`, `stop_angle`, `current_trace`, `evidence`, plus
+  `effective_bound`, `step`, `backoff`, `generated_at`. Evidence PNGs `<servo>_{max,min}_{stop,backoff}.png`
+  go next to it. `--out` is refused (exit 2) if it resolves (symlinks and `..` followed) under
+  `config/` or its file name starts with `limits.`.
+- Exit codes: `0` done, `1` aborted (servo sent to neutral), `2` setup error or refused arguments.
+
+To apply a proposal, a human edits `config/limits.yaml`, regenerates the header and reflashes.
+
 ## Extech 383273 multimeter
 
 `bench/instruments/extech_383273.py` polls the meter over RS-232 and prints readings.
