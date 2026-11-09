@@ -3,6 +3,68 @@
 Readers for lab instruments, so agents can log measurements during hardware work.
 Nothing here runs on the head or in the brain; it is tooling for the bench.
 
+## Motion test (CLI)
+
+Flashes the head, drives it through a fixed sequence (center, look left/right/up/down, blink,
+center, fail-safe) and judges it from the camera and the supply current.
+
+### Rig setup
+
+- **Camera:** Logitech C922 looking at the eyes, fixed in place, with steady lighting.
+- **ESP32:** connected over USB (flashing and serial log). The head must have Wi-Fi configured
+  in `firmware/eyes_esp32/include/secrets.h` (gitignored).
+- **Extech 383273:** in series with the **servo supply**, set to a DC current range (`DCA`),
+  RS-232 to USB adapter to the PC. Use `--no-meter` only when there is no meter: without it
+  nothing stops the test when a servo stalls.
+- `pip install -e '.[bench]'`, and your user in the `video` and `dialout` groups
+  (`sudo usermod -aG video,dialout $USER`, then log in again).
+
+### Run
+
+```sh
+python -m bench.motion_test --port /dev/ttyUSB0 --meter-port /dev/ttyUSB1 --stall-amps 0.8
+python -m bench.motion_test --port /dev/ttyUSB0 --no-meter --stall-amps 0.8 --skip-flash
+```
+
+- `--port` ESP32 serial port (required). `--stall-amps` abort threshold in amps (required, no
+  default; pick a value just above the normal running current of your supply).
+- Exactly one of `--meter-port` or `--no-meter` is required.
+- `--host` head address. Default: `$EYES_HOST`, else the IP printed on the serial log
+  (`[wifi] connected, IP ...`). With `--skip-flash` the board has already booted, so the IP line
+  may be missed: reset the board, or pass `--host`.
+- `--camera` (default `/dev/video0`), `--width --height --fps --fourcc --exposure --gain
+  --focus --wb-temperature --warmup-frames`: see `bench.camera.CameraSettings`.
+- `--skip-flash`, `--limits` (default `config/limits.yaml`), `--out`
+  (default `bench/out/<UTC timestamp>/`, gitignored).
+
+**`config/limits.yaml` is human-owned.** The test only reads it. Never edit it to make a test
+pass; calibrate on the bench and let a human change it.
+
+Exit codes: `0` passed, `1` failed or aborted (including overcurrent and meter errors),
+`2` setup error (bad arguments, flash failure, no IP, camera or meter not usable).
+A current over `--stall-amps` sends `center`, stops sending and aborts the remaining steps.
+
+### Report
+
+`<out>/report.json` (the head's address is never written) and key frames in `<out>/frames/`.
+Top level: `schema_version`, `started_at`, `camera_settings`, `command_timeout_ms`,
+`stall_amps`, `noise_threshold`, `steps`, `passed`, `aborted` (`null` or a reason such as
+`overcurrent`). Each step has `name`, `command`, `t_sent`, `status` (`passed`, `failed` or
+`skipped`), `checks`, `latency_s`, `settle_time_s`, `max_amps`, `key_frames`.
+
+### Reading a failure
+
+1. Look at `aborted` first. `overcurrent` means a servo stalled or the stall limit is too low;
+   later steps are `skipped`.
+2. Find the first step with `status: "failed"` and the `false` entries in its `checks`:
+   `moved` (the image did not change: wiring, power, wrong host or key), `settled` (still moving
+   at the end of the window), `current_ok` (max current above `--stall-amps`),
+   `returned_to_reference` (blink did not return to the starting picture) and
+   `returned_to_neutral` (the fail-safe did not bring the eyes back to neutral).
+3. Open the PNGs listed in `key_frames` to see what the camera saw.
+4. The `failsafe` step may also have `evidence.serial_failsafe_enter`: whether the serial log
+   showed `[failsafe] ENTER`.
+
 ## Extech 383273 multimeter
 
 `bench/instruments/extech_383273.py` polls the meter over RS-232 and prints readings.
