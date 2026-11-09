@@ -33,7 +33,18 @@ import yaml
 
 from brain import eye_protocol
 from brain.eye_protocol import Blink, Center, Command, Look, Ping, ProtocolError, Servo
-from brain.limits import Limits, load_limits
+from brain.limits import Limits, UnknownServoError, load_limits
+
+# Protocol ``ch`` for each servo name. Independent of ``channel`` in limits.yaml,
+# which may become a hardware pin index on other boards.
+SERVO_PROTOCOL_CHANNELS = {
+    "eye_pan": 0,
+    "eye_tilt": 1,
+    "lid_upper_left": 2,
+    "lid_lower_left": 3,
+    "lid_upper_right": 4,
+    "lid_lower_right": 5,
+}
 
 HOST_ENV = "EYES_HOST"
 KEY_ENV = "EYES_KEY"
@@ -136,10 +147,14 @@ class EyeClient:
         clamps again). Raises ``UnknownServoError`` for a name not in the limits and
         ``eye_protocol.ProtocolError`` (a ValueError) for NaN/inf, before anything is sent.
         """
-        lim = self.limits[name]
+        self.limits[name]  # UnknownServoError if not in the limits
+        try:
+            ch = SERVO_PROTOCOL_CHANNELS[name]
+        except KeyError:
+            raise UnknownServoError(name) from None
         if isinstance(deg, bool) or not isinstance(deg, (int, float)) or not math.isfinite(deg):
             raise ProtocolError(f"deg for servo {name!r} must be a finite number")
-        return self.send(Servo(lim.channel, self.limits.clamp(name, deg)))
+        return self.send(Servo(ch, self.limits.clamp(name, deg)))
 
     def send(self, cmd: Command) -> int:
         """Encode, sign and send ``cmd`` with the next seq. Returns the seq used.
