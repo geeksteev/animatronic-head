@@ -142,6 +142,22 @@ def test_servo_uses_channel_and_min(tmp_path):
     assert cmds == [Servo(5, 80), Servo(5, 95.5)]
 
 
+def test_servo_ignores_limits_channel_numbering(tmp_path):
+    p = tmp_path / "limits.yaml"
+    names = list(eye_client.SERVO_PROTOCOL_CHANNELS)
+    rows = "".join(
+        f"  {n}: {{ channel: {5 - i}, min: 60, max: 120, neutral: 90, max_speed_dps: 300 }}\n"
+        for i, n in enumerate(names)
+    )
+    p.write_text("failsafe:\n  command_timeout_ms: 500\nservos:\n" + rows)
+    sock = FakeSocket()
+    with _fake_client(load_limits(p), sock) as c:
+        for n in names:
+            c.servo(n, 90)
+    cmds = [eye_protocol.decode_signed(d, KEY)[1] for d, _ in sock.sent]
+    assert cmds == [Servo(i, 90) for i in range(6)]
+
+
 def test_servo_over_udp(client, head):
     client.servo("eye_pan", 100)
     assert _recv(head)[0] == Servo(0, 100)
